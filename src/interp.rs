@@ -84,7 +84,8 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
 
             eval(body, new_env)?
         }
-        Expr::Let(x, e, body) => {
+        Expr::Op(_, _, _) => unimplemented!(),
+        Expr::Let(_, x, e, body) => {
             let mut v = eval(e, env.clone())?;
 
             if let Value::Closure(name, _, _, new_env) = &mut v {
@@ -288,6 +289,7 @@ mod tests {
 
         // let id = fn(y) { y } id
         let expr = spanned(Expr::Let(
+            None,
             "id",
             Box::new(spanned(Expr::Fn(
                 spanned(vec!["y"]),
@@ -309,6 +311,7 @@ mod tests {
 
         // let z = x z
         let expr = spanned(Expr::Let(
+            None,
             "z",
             Box::new(spanned(Expr::Var("x"))),
             Box::new(spanned(Expr::Var("z"))),

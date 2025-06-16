@@ -47,6 +47,8 @@ pub fn lexer<'src>()
         text::unicode::keyword("fn").to(Token::Fn),
         text::unicode::keyword("let").to(Token::Let),
         text::unicode::keyword("case").to(Token::Case),
+        text::unicode::keyword("opl").to(Token::Opl),
+        text::unicode::keyword("opr").to(Token::Opr),
     ));
 
     let ident = any()

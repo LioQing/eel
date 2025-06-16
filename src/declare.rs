@@ -40,6 +40,8 @@ pub enum Token<'src> {
     Fn,
     Let,
     Case,
+    Opl,
+    Opr,
     PattArm,
     Assign,
     Ident(&'src str),
@@ -59,6 +61,8 @@ impl fmt::Display for Token<'_> {
             Token::Fn => write!(f, "fn"),
             Token::Let => write!(f, "let"),
             Token::Case => write!(f, "case"),
+            Token::Opl => write!(f, "opl"),
+            Token::Opr => write!(f, "opr"),
             Token::PattArm => write!(f, "=>"),
             Token::Assign => write!(f, "="),
             Token::Ident(ident) => write!(f, "{ident}"),
@@ -198,7 +202,13 @@ pub enum Expr<'src> {
         Box<Spanned<Self>>,
         Spanned<Vec<(Spanned<Patt<'src>>, Box<Spanned<Self>>)>>,
     ),
-    Let(&'src str, Box<Spanned<Self>>, Box<Spanned<Self>>),
+    Op(Box<Spanned<Self>>, Box<Spanned<Self>>, Box<Spanned<Self>>),
+    Let(
+        Option<(OpAssoc, i64)>,
+        &'src str,
+        Box<Spanned<Self>>,
+        Box<Spanned<Self>>,
+    ),
     Seq(Box<Spanned<Self>>, Box<Spanned<Self>>),
     Builtin(fn(&Spanned<Expr<'src>>, &Env<'src>) -> Result<Value<'src>, Error>),
 }
@@ -244,7 +254,21 @@ impl<'src> fmt::Display for Expr<'src> {
                         .join(", "),
                 )
             }
-            Expr::Let(ident, assign, body) => write!(f, "let {ident} = {} {}", assign.0, body.0),
+            Expr::Op(l, op, r) => write!(f, "({} {} {})", l.0, op.0, r.0),
+            Expr::Let(op_spec, ident, assign, body) => {
+                write!(
+                    f,
+                    "let{} {} = {} {}",
+                    match op_spec {
+                        Some((OpAssoc::Left, prec)) => format!(" opl {prec}"),
+                        Some((OpAssoc::Right, prec)) => format!(" opr {prec}"),
+                        None => "".to_string(),
+                    },
+                    ident,
+                    assign.0,
+                    body.0
+                )
+            }
             Expr::Seq(first, second) => write!(f, "{} {}", first.0, second.0),
             Expr::Builtin(_) => write!(f, "<builtin>"),
         }
@@ -271,8 +295,17 @@ impl<'src> SpanlessPartialEq for Expr<'src> {
                         },
                     )
             }
-            (Expr::Let(l_ident, l_assign, l_body), Expr::Let(r_ident, r_assign, r_body)) => {
-                l_ident == r_ident && l_assign.spanless_eq(r_assign) && l_body.spanless_eq(r_body)
+            (Expr::Op(l_left, l_op, l_right), Expr::Op(r_left, r_op, r_right)) => {
+                l_left.spanless_eq(r_left) && l_op.spanless_eq(r_op) && l_right.spanless_eq(r_right)
+            }
+            (
+                Expr::Let(l_op_spec, l_ident, l_assign, l_body),
+                Expr::Let(r_op_spec, r_ident, r_assign, r_body),
+            ) => {
+                l_op_spec == r_op_spec
+                    && l_ident == r_ident
+                    && l_assign.spanless_eq(r_assign)
+                    && l_body.spanless_eq(r_body)
             }
             (Expr::Seq(l_first, l_second), Expr::Seq(r_first, r_second)) => {
                 l_first.spanless_eq(r_first) && l_second.spanless_eq(r_second)
@@ -298,4 +331,6 @@ impl fmt::Display for OpAssoc {
     }
 }
 
-pub type OpAssocs<'src> = extra::SimpleState<Vec<(&'src str, OpAssoc)>>;
+pub type OpSpec<'src> = (&'src str, OpAssoc, i64);
+
+pub type OpSpecs<'src> = extra::SimpleState<Vec<OpSpec<'src>>>;

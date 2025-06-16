@@ -7,7 +7,7 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
     'toks,
     I,
     Spanned<Expr<'src>>,
-    extra::Full<Rich<'toks, Token<'src>, Span>, OpAssocs<'src>, ()>,
+    extra::Full<Rich<'toks, Token<'src>, Span>, OpSpecs<'src>, ()>,
 > + Clone {
     recursive(|expr| {
         let value = select! {
@@ -22,8 +22,11 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
 
         let var = ident.map(Expr::Var).labelled("variable");
 
-        let inline = recursive(|inline| {
-            let paren = inline
+        let mut op = Recursive::declare();
+        let mut inline = Recursive::declare();
+
+        inline.define({
+            let paren = op
                 .clone()
                 .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
                 .recover_with(via_parser(nested_delimiters(
@@ -47,8 +50,7 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
 
             let atom = choice((lit, var))
                 .map_with(|expr, e| (expr, e.span()))
-                .or(paren)
-                .or(block);
+                .or(choice((paren, block)));
 
             let call = atom
                 .clone()
@@ -122,12 +124,31 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
             choice((call, r#fn, case))
         });
 
+        op.define(
+            inline
+                .clone()
+                .then(inline.clone())
+                .then(op.clone().or(inline.clone()))
+                .map_with(|((l, op), r), e| {
+                    (Expr::Op(Box::new(l), Box::new(op), Box::new(r)), e.span())
+                }),
+        );
+
         let r#let = just(Token::Let)
-            .ignore_then(ident)
+            .ignore_then(
+                just(Token::Opl)
+                    .to(OpAssoc::Left)
+                    .or(just(Token::Opr).to(OpAssoc::Right))
+                    .then(select! { Token::Int(v) => v })
+                    .or_not(),
+            )
+            .then(ident)
             .then_ignore(just(Token::Assign))
             .then(inline.clone())
             .then(expr.clone())
-            .map(|((x, assign), body)| Expr::Let(x, Box::new(assign), Box::new(body)))
+            .map(|(((op_spec, x), assign), body)| {
+                Expr::Let(op_spec, x, Box::new(assign), Box::new(body))
+            })
             .map_with(|expr, e| (expr, e.span()))
             .labelled("let expression");
 
@@ -138,7 +159,7 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
             })
             .labelled("sequence expression");
 
-        choice((r#let, seq)).labelled("expression")
+        choice((op, r#let, seq)).labelled("expression")
     })
 }
 
@@ -409,6 +430,42 @@ mod tests {
     }
 
     #[test]
+    fn test_op() {
+        assert_ast!(
+            "x + y",
+            spanned(Expr::Op(
+                Box::new(spanned(Expr::Var("x"))),
+                Box::new(spanned(Expr::Var("+"))),
+                Box::new(spanned(Expr::Var("y"))),
+            )),
+        );
+        assert_ast!(
+            "x + y * z",
+            spanned(Expr::Op(
+                Box::new(spanned(Expr::Var("x"))),
+                Box::new(spanned(Expr::Var("+"))),
+                Box::new(spanned(Expr::Op(
+                    Box::new(spanned(Expr::Var("y"))),
+                    Box::new(spanned(Expr::Var("*"))),
+                    Box::new(spanned(Expr::Var("z"))),
+                ))),
+            )),
+        );
+        assert_ast!(
+            "(x + y) * z",
+            spanned(Expr::Op(
+                Box::new(spanned(Expr::Op(
+                    Box::new(spanned(Expr::Var("x"))),
+                    Box::new(spanned(Expr::Var("+"))),
+                    Box::new(spanned(Expr::Var("y"))),
+                ))),
+                Box::new(spanned(Expr::Var("*"))),
+                Box::new(spanned(Expr::Var("z"))),
+            )),
+        );
+    }
+
+    #[test]
     fn test_let() {
         assert_ast!(
             "
@@ -416,6 +473,7 @@ mod tests {
             x
             ",
             spanned(Expr::Let(
+                None,
                 "x",
                 Box::new(spanned(Expr::Lit(Value::Int(42)))),
                 Box::new(spanned(Expr::Var("x"))),
@@ -427,6 +485,7 @@ mod tests {
             y
             ",
             spanned(Expr::Let(
+                None,
                 "x",
                 Box::new(spanned(Expr::Var("y"))),
                 Box::new(spanned(Expr::Var("y"))),
@@ -441,13 +500,33 @@ mod tests {
             x
             ",
             spanned(Expr::Let(
+                None,
                 "x",
                 Box::new(spanned(Expr::Let(
+                    None,
                     "y",
                     Box::new(spanned(Expr::Lit(Value::Int(42)))),
                     Box::new(spanned(Expr::Var("y"))),
                 ))),
                 Box::new(spanned(Expr::Var("x"))),
+            )),
+        );
+        assert_ast!(
+            "
+            let opl 0 x = 42
+            let opr 1 y = x
+            y
+            ",
+            spanned(Expr::Let(
+                Some((OpAssoc::Left, 0)),
+                "x",
+                Box::new(spanned(Expr::Lit(Value::Int(42)))),
+                Box::new(spanned(Expr::Let(
+                    Some((OpAssoc::Right, 1)),
+                    "y",
+                    Box::new(spanned(Expr::Var("x"))),
+                    Box::new(spanned(Expr::Var("y"))),
+                ))),
             )),
         );
     }

@@ -131,10 +131,6 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
 
             eval(body, new_env)?
         }
-        Expr::Seq(e1, e2) => {
-            let _ = eval(e1, env.clone())?;
-            eval(e2, env)?
-        }
         Expr::Builtin(f) => f(&expr, &env)?,
     })
 }
@@ -388,19 +384,6 @@ mod tests {
             "z",
             Box::new(spanned(Expr::Var("x"))),
             Box::new(spanned(Expr::Var("z"))),
-        ));
-
-        assert_eval(expr, env, Value::Int(42));
-    }
-
-    #[test]
-    fn test_seq() {
-        let env = vec![("x", Value::Int(42)), ("y", Value::Float(3.14))];
-
-        // y x
-        let expr = spanned(Expr::Seq(
-            Box::new(spanned(Expr::Var("y"))),
-            Box::new(spanned(Expr::Var("x"))),
         ));
 
         assert_eval(expr, env, Value::Int(42));

@@ -85,3 +85,15 @@ fn print_errs<'src>(
             .unwrap()
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_examples() {
+        ["examples/cons.eel", "examples/fib.eel"]
+            .iter()
+            .for_each(run);
+    }
+}

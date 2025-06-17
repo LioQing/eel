@@ -1,0 +1,31 @@
+let cons = fn(x, xs) { unit }
+let nil = fn() { unit }
+
+let length = fn(xs) {
+    case (xs) {
+        nil() => 0
+        cons(_, xs) => { 1 + length(xs). }
+    }
+}
+
+let map = fn(xs, f) {
+    case (xs) {
+        nil() => nil()
+        cons(x, xs) => cons(f(x)., map(xs, f).)
+    }
+}
+
+let list = cons(1, cons(2, cons(3, nil())))
+let doubledList = map(list, fn(x) { x * 2 }).
+let lengthOfList = length(list).
+
+let _ = print(list).
+// cons (x=1, xs=cons (x=2, xs=cons (x=3, xs=nil() { unit }) { unit }) { unit }) { unit }
+
+let _ = print(doubledList).
+// cons (x=2, xs=cons (x=4, xs=cons (x=6, xs=nil() { unit }) { unit }) { unit }) { unit }
+
+let _ = print(lengthOfList).
+// 3
+
+0

@@ -29,6 +29,7 @@ impl SpanlessPartialEq for Vec<&str> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token<'src> {
+    Unit,
     Float(f64),
     Int(i64),
     OpenParen,
@@ -50,6 +51,7 @@ pub enum Token<'src> {
 impl fmt::Display for Token<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Token::Unit => write!(f, "unit"),
             Token::Float(value) => write!(f, "{value}"),
             Token::Int(value) => write!(f, "{value}"),
             Token::OpenParen => write!(f, "("),
@@ -86,6 +88,7 @@ pub type Env<'src> = Vec<(&'src str, Value<'src>)>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value<'src> {
+    Unit,
     Float(f64),
     Int(i64),
     Closure(
@@ -105,12 +108,13 @@ pub enum Value<'src> {
 impl<'src> fmt::Display for Value<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Value::Unit => write!(f, "unit"),
             Value::Float(value) => write!(f, "{value}"),
             Value::Int(value) => write!(f, "{value}"),
             Value::Closure(name, params, body, _) => {
                 write!(
                     f,
-                    "fn {}({}) {{ {} }}",
+                    "fn{}({}) {{ {} }}",
                     match name {
                         Some(n) => format!(" {n}"),
                         None => String::new(),
@@ -127,10 +131,7 @@ impl<'src> fmt::Display for Value<'src> {
                 write!(
                     f,
                     "{}({}) {{ {} }}",
-                    match name {
-                        Some(n) => format!("{n} "),
-                        None => String::new(),
-                    },
+                    name.unwrap_or(""),
                     args_env
                         .iter()
                         .map(|(k, v)| format!("{k}={v}"))
@@ -209,7 +210,6 @@ pub enum Expr<'src> {
         Box<Spanned<Self>>,
         Box<Spanned<Self>>,
     ),
-    Seq(Box<Spanned<Self>>, Box<Spanned<Self>>),
     Builtin(fn(&Spanned<Expr<'src>>, &Env<'src>) -> Result<Value<'src>, Error>),
 }
 
@@ -269,7 +269,6 @@ impl<'src> fmt::Display for Expr<'src> {
                     body.0
                 )
             }
-            Expr::Seq(first, second) => write!(f, "{} {}", first.0, second.0),
             Expr::Builtin(_) => write!(f, "<builtin>"),
         }
     }
@@ -306,9 +305,6 @@ impl<'src> SpanlessPartialEq for Expr<'src> {
                     && l_ident == r_ident
                     && l_assign.spanless_eq(r_assign)
                     && l_body.spanless_eq(r_body)
-            }
-            (Expr::Seq(l_first, l_second), Expr::Seq(r_first, r_second)) => {
-                l_first.spanless_eq(r_first) && l_second.spanless_eq(r_second)
             }
             _ => false,
         }

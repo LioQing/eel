@@ -13,6 +13,7 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
         let value = select! {
             Token::Float(v) => Value::Float(v),
             Token::Int(v) => Value::Int(v),
+            Token::Unit => Value::Unit,
         }
         .labelled("value");
 
@@ -25,110 +26,108 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
         let mut inline = Recursive::declare();
         let mut op = Recursive::declare();
 
-        inline.define({
-            let paren = op
-                .clone()
-                .or(inline.clone())
-                .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-                .recover_with(via_parser(nested_delimiters(
-                    Token::OpenParen,
-                    Token::CloseParen,
-                    [(Token::OpenBrace, Token::CloseBrace)],
-                    |span| (Expr::Err, span),
-                )))
-                .labelled("parenthesized expression");
+        let block = expr
+            .clone()
+            .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
+            .recover_with(via_parser(nested_delimiters(
+                Token::OpenBrace,
+                Token::CloseBrace,
+                [(Token::OpenParen, Token::CloseParen)],
+                |span| (Expr::Err, span),
+            )))
+            .labelled("block expression");
 
-            let block = expr
-                .clone()
-                .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
-                .recover_with(via_parser(nested_delimiters(
-                    Token::OpenBrace,
-                    Token::CloseBrace,
-                    [(Token::OpenParen, Token::CloseParen)],
-                    |span| (Expr::Err, span),
-                )))
-                .labelled("block expression");
+        let paren = op
+            .clone()
+            .or(inline.clone())
+            .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
+            .recover_with(via_parser(nested_delimiters(
+                Token::OpenParen,
+                Token::CloseParen,
+                [(Token::OpenBrace, Token::CloseBrace)],
+                |span| (Expr::Err, span),
+            )))
+            .labelled("parenthesized expression");
 
-            let atom = choice((lit, var))
-                .map_with(|expr, e| (expr, e.span()))
-                .or(choice((paren, block)));
+        let atom = choice((lit, var))
+            .map_with(|expr, e| (expr, e.span()))
+            .or(choice((block, paren)));
 
-            let call = atom
-                .clone()
-                .foldl_with(
-                    op.clone()
-                        .or(inline.clone())
-                        .separated_by(just(Token::Comma))
-                        .allow_trailing()
-                        .collect::<Vec<_>>()
-                        .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-                        .or(just(Token::Dot).map(|_| vec![]))
-                        .map_with(|args, e| (args, e.span()))
-                        .repeated(),
-                    |f, args, e| (Expr::Call(Box::new(f), args), e.span()),
-                )
-                .labelled("call expression");
+        let call = atom
+            .clone()
+            .foldl_with(
+                op.clone()
+                    .or(inline.clone())
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
+                    .or(just(Token::Dot).map(|_| vec![]))
+                    .map_with(|args, e| (args, e.span()))
+                    .repeated(),
+                |f, args, e| (Expr::Call(Box::new(f), args), e.span()),
+            )
+            .labelled("call expression");
 
-            let r#fn = just(Token::Fn)
-                .ignore_then(
-                    ident
-                        .separated_by(just(Token::Comma))
-                        .allow_trailing()
-                        .collect::<Vec<_>>()
-                        .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-                        .map_with(|params, e| (params, e.span())),
-                )
-                .then(inline.clone())
-                .map_with(|(params, body), e| (Expr::Fn(params, Box::new(body)), e.span()))
-                .labelled("function expression");
+        let r#fn = just(Token::Fn)
+            .ignore_then(
+                ident
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
+                    .map_with(|params, e| (params, e.span())),
+            )
+            .then(inline.clone())
+            .map_with(|(params, body), e| (Expr::Fn(params, Box::new(body)), e.span()))
+            .labelled("function expression");
 
-            let patt = recursive(|case_patt| {
-                let r#struct = ident
-                    .then(
-                        case_patt
-                            .clone()
-                            .separated_by(just(Token::Comma))
-                            .allow_trailing()
-                            .collect::<Vec<_>>()
-                            .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-                            .map_with(|patt, e| (patt, e.span())),
-                    )
-                    .map(|(name, fields)| Patt::Struct(name, fields))
-                    .labelled("struct pattern");
-                let var = ident.map(Patt::Var).labelled("variable pattern");
-                let lit = value.map(Patt::Lit).labelled("literal pattern");
-
-                choice((r#struct, var, lit))
-                    .map_with(|patt, e| (patt, e.span()))
-                    .labelled("pattern")
-            });
-
-            let case_arm = patt
-                .then_ignore(just(Token::PattArm))
-                .then(op.clone().or(inline.clone()))
-                .map(|(patt, body)| (patt, Box::new(body)))
-                .labelled("case expression arm");
-
-            let case = just(Token::Case)
-                .ignore_then(inline.clone())
+        let patt = recursive(|case_patt| {
+            let r#struct = ident
                 .then(
-                    case_arm
-                        .repeated()
-                        .at_least(1)
+                    case_patt
+                        .clone()
+                        .separated_by(just(Token::Comma))
+                        .allow_trailing()
                         .collect::<Vec<_>>()
-                        .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
-                        .map_with(|arms, e| (arms, e.span())),
+                        .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
+                        .map_with(|patt, e| (patt, e.span())),
                 )
-                .map_with(|(expr, arms), e| (Expr::Case(Box::new(expr), arms), e.span()))
-                .labelled("case expression");
+                .map(|(name, fields)| Patt::Struct(name, fields))
+                .labelled("struct pattern");
+            let var = ident.map(Patt::Var).labelled("variable pattern");
+            let lit = value.map(Patt::Lit).labelled("literal pattern");
 
-            choice((call, r#fn, case))
+            choice((r#struct, var, lit))
+                .map_with(|patt, e| (patt, e.span()))
+                .labelled("pattern")
         });
+
+        let case_arm = patt
+            .then_ignore(just(Token::PattArm))
+            .then(inline.clone())
+            .map(|(patt, body)| (patt, Box::new(body)))
+            .labelled("case expression arm");
+
+        let case = just(Token::Case)
+            .ignore_then(inline.clone())
+            .then(
+                case_arm
+                    .repeated()
+                    .at_least(1)
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
+                    .map_with(|arms, e| (arms, e.span())),
+            )
+            .map_with(|(expr, arms), e| (Expr::Case(Box::new(expr), arms), e.span()))
+            .labelled("case expression");
+
+        inline.define(choice((call, r#fn, case)));
 
         op.define(
             inline
                 .clone()
-                .then(inline.clone().and_is(just(Token::OpenParen).not()))
+                .then(atom)
                 .then(op.clone().or(inline.clone()))
                 .map_with(|((l, op), r), e| {
                     (Expr::Op(Box::new(l), Box::new(op), Box::new(r)), e.span())
@@ -153,14 +152,7 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
             .map_with(|expr, e| (expr, e.span()))
             .labelled("let expression");
 
-        let seq = inline
-            .clone()
-            .foldl_with(expr.clone().repeated(), |a, b, e| {
-                (Expr::Seq(Box::new(a), Box::new(b)), e.span())
-            })
-            .labelled("sequence expression");
-
-        choice((op, r#let, seq)).labelled("expression")
+        choice((op, inline, r#let)).labelled("expression")
     })
 }
 
@@ -529,7 +521,7 @@ mod tests {
     #[test]
     fn test_case_op() {
         assert_ast!(
-            "case x + y { 42 => z }",
+            "case (x + y) { 42 => z }",
             spanned(Expr::Case(
                 Box::new(spanned(Expr::Op(
                     Box::new(spanned(Expr::Var("x"))),
@@ -662,31 +654,6 @@ mod tests {
                     Box::new(spanned(Expr::Var("x"))),
                     Box::new(spanned(Expr::Var("y"))),
                 ))),
-            )),
-        );
-    }
-
-    #[test]
-    fn test_seq_two_vars() {
-        assert_ast!(
-            "x y",
-            spanned(Expr::Seq(
-                Box::new(spanned(Expr::Var("x"))),
-                Box::new(spanned(Expr::Var("y"))),
-            )),
-        );
-    }
-
-    #[test]
-    fn test_seq_call_then_var() {
-        assert_ast!(
-            "x(y) z",
-            spanned(Expr::Seq(
-                Box::new(spanned(Expr::Call(
-                    Box::new(spanned(Expr::Var("x"))),
-                    spanned(vec![spanned(Expr::Var("y"))]),
-                ))),
-                Box::new(spanned(Expr::Var("z"))),
             )),
         );
     }

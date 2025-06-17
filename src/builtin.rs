@@ -118,6 +118,7 @@ pub fn env<'src>() -> Env<'src> {
             match (a, b) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a == b { 1 } else { 0 })),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a == b { 1 } else { 0 })),
+                (Value::Unit, Value::Unit) => Ok(Value::Int(1)),
                 _ => Err(Error {
                     msg: format!("Cannot compare {a} and {b} for equality"),
                     span: expr.1.clone(),

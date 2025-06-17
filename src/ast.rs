@@ -22,12 +22,13 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
 
         let var = ident.map(Expr::Var).labelled("variable");
 
-        let mut op = Recursive::declare();
         let mut inline = Recursive::declare();
+        let mut op = Recursive::declare();
 
         inline.define({
             let paren = op
                 .clone()
+                .or(inline.clone())
                 .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
                 .recover_with(via_parser(nested_delimiters(
                     Token::OpenParen,
@@ -55,8 +56,8 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
             let call = atom
                 .clone()
                 .foldl_with(
-                    inline
-                        .clone()
+                    op.clone()
+                        .or(inline.clone())
                         .separated_by(just(Token::Comma))
                         .allow_trailing()
                         .collect::<Vec<_>>()
@@ -104,7 +105,7 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
 
             let case_arm = patt
                 .then_ignore(just(Token::PattArm))
-                .then(inline.clone())
+                .then(op.clone().or(inline.clone()))
                 .map(|(patt, body)| (patt, Box::new(body)))
                 .labelled("case expression arm");
 
@@ -127,7 +128,7 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
         op.define(
             inline
                 .clone()
-                .then(inline.clone())
+                .then(inline.clone().and_is(just(Token::OpenParen).not()))
                 .then(op.clone().or(inline.clone()))
                 .map_with(|((l, op), r), e| {
                     (Expr::Op(Box::new(l), Box::new(op), Box::new(r)), e.span())
@@ -223,28 +224,72 @@ mod tests {
     }
 
     #[test]
-    fn test_lit() {
+    fn test_lit_positive_int() {
         assert_ast!("42", spanned(Expr::Lit(Value::Int(42))));
+    }
+
+    #[test]
+    fn test_lit_negative_int() {
         assert_ast!("-42", spanned(Expr::Lit(Value::Int(-42))));
+    }
+
+    #[test]
+    fn test_lit_negative_float() {
         assert_ast!("-2.718", spanned(Expr::Lit(Value::Float(-2.718))));
+    }
+
+    #[test]
+    fn test_lit_positive_float() {
         assert_ast!("3.14", spanned(Expr::Lit(Value::Float(3.14))));
+    }
+
+    #[test]
+    fn test_lit_float_scientific_notation_e() {
         assert_ast!("3e8", spanned(Expr::Lit(Value::Float(3e8))));
+    }
+
+    #[test]
+    fn test_lit_float_scientific_notation_e_with_decimal() {
         assert_ast!("1.0e10", spanned(Expr::Lit(Value::Float(1.0e10))));
+    }
+
+    #[test]
+    fn test_lit_float_scientific_notation_negative_exponent() {
         assert_ast!("-1.0E-5", spanned(Expr::Lit(Value::Float(-1.0e-5))));
     }
 
     #[test]
-    fn test_var() {
+    fn test_var_simple_foo() {
         assert_ast!("foo", spanned(Expr::Var("foo")));
+    }
+
+    #[test]
+    fn test_var_simple_bar() {
         assert_ast!("bar", spanned(Expr::Var("bar")));
+    }
+
+    #[test]
+    fn test_var_with_leading_underscore() {
         assert_ast!("_baz", spanned(Expr::Var("_baz")));
+    }
+
+    #[test]
+    fn test_var_alphanumeric() {
         assert_ast!("abc123", spanned(Expr::Var("abc123")));
+    }
+
+    #[test]
+    fn test_var_emoji() {
         assert_ast!("🦀", spanned(Expr::Var("🦀")));
+    }
+
+    #[test]
+    fn test_var_symbols() {
         assert_ast!("::<>", spanned(Expr::Var("::<>")));
     }
 
     #[test]
-    fn test_call() {
+    fn test_call_no_args_parentheses() {
         assert_ast!(
             "foo()",
             spanned(Expr::Call(
@@ -252,6 +297,10 @@ mod tests {
                 spanned(vec![])
             )),
         );
+    }
+
+    #[test]
+    fn test_call_no_args_dot() {
         assert_ast!(
             "bar.",
             spanned(Expr::Call(
@@ -259,6 +308,10 @@ mod tests {
                 spanned(vec![]),
             )),
         );
+    }
+
+    #[test]
+    fn test_call_multiple_arg_types() {
         assert_ast!(
             "foo(1, 2.0, bar)",
             spanned(Expr::Call(
@@ -270,6 +323,10 @@ mod tests {
                 ]),
             )),
         );
+    }
+
+    #[test]
+    fn test_call_single_int_arg() {
         assert_ast!(
             "bar(42)",
             spanned(Expr::Call(
@@ -277,6 +334,10 @@ mod tests {
                 spanned(vec![spanned(Expr::Lit(Value::Int(42)))]),
             )),
         );
+    }
+
+    #[test]
+    fn test_call_chained_calls() {
         assert_ast!(
             "foo(bar)(baz)",
             spanned(Expr::Call(
@@ -287,6 +348,10 @@ mod tests {
                 spanned(vec![spanned(Expr::Var("baz"))]),
             )),
         );
+    }
+
+    #[test]
+    fn test_call_chained_call_with_dot() {
         assert_ast!(
             "foo(bar).",
             spanned(Expr::Call(
@@ -297,6 +362,10 @@ mod tests {
                 spanned(vec![]),
             )),
         );
+    }
+
+    #[test]
+    fn test_call_nested_call_as_arg() {
         assert_ast!(
             "foo(bar, baz(42))",
             spanned(Expr::Call(
@@ -313,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fn() {
+    fn test_fn_no_params_block_body() {
         assert_ast!(
             "fn() { 42 }",
             spanned(Expr::Fn(
@@ -321,6 +390,10 @@ mod tests {
                 Box::new(spanned(Expr::Lit(Value::Int(42)))),
             )),
         );
+    }
+
+    #[test]
+    fn test_fn_single_param_expr_body() {
         assert_ast!(
             "fn(x) x",
             spanned(Expr::Fn(
@@ -328,6 +401,10 @@ mod tests {
                 Box::new(spanned(Expr::Var("x"))),
             )),
         );
+    }
+
+    #[test]
+    fn test_fn_nested_block_body() {
         assert_ast!(
             "fn(x) { fn(y) x(y) }",
             spanned(Expr::Fn(
@@ -341,6 +418,10 @@ mod tests {
                 ))),
             )),
         );
+    }
+
+    #[test]
+    fn test_fn_nested_expr_body() {
         assert_ast!(
             "fn(x) fn(y) x(y)",
             spanned(Expr::Fn(
@@ -354,6 +435,10 @@ mod tests {
                 ))),
             )),
         );
+    }
+
+    #[test]
+    fn test_fn_multiple_params_block_body() {
         assert_ast!(
             "fn(x, y) { x(y) }",
             spanned(Expr::Fn(
@@ -367,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn test_case() {
+    fn test_case_single_arm_lit_pattern() {
         assert_ast!(
             "case x { 42 => y }",
             spanned(Expr::Case(
@@ -378,6 +463,10 @@ mod tests {
                 )]),
             )),
         );
+    }
+
+    #[test]
+    fn test_case_single_arm_var_pattern() {
         assert_ast!(
             "case x { y => z }",
             spanned(Expr::Case(
@@ -388,6 +477,10 @@ mod tests {
                 )]),
             )),
         );
+    }
+
+    #[test]
+    fn test_case_single_arm_struct_pattern() {
         assert_ast!(
             "case x { y(z) => w }",
             spanned(Expr::Case(
@@ -398,6 +491,10 @@ mod tests {
                 )]),
             )),
         );
+    }
+
+    #[test]
+    fn test_case_multiple_arms() {
         assert_ast!(
             "
             case x {
@@ -430,7 +527,25 @@ mod tests {
     }
 
     #[test]
-    fn test_op() {
+    fn test_case_op() {
+        assert_ast!(
+            "case x + y { 42 => z }",
+            spanned(Expr::Case(
+                Box::new(spanned(Expr::Op(
+                    Box::new(spanned(Expr::Var("x"))),
+                    Box::new(spanned(Expr::Var("+"))),
+                    Box::new(spanned(Expr::Var("y"))),
+                ))),
+                spanned(vec![(
+                    spanned(Patt::Lit(Value::Int(42))),
+                    Box::new(spanned(Expr::Var("z"))),
+                )]),
+            )),
+        );
+    }
+
+    #[test]
+    fn test_op_simple_addition() {
         assert_ast!(
             "x + y",
             spanned(Expr::Op(
@@ -439,6 +554,10 @@ mod tests {
                 Box::new(spanned(Expr::Var("y"))),
             )),
         );
+    }
+
+    #[test]
+    fn test_op_precedence_mul_then_add() {
         assert_ast!(
             "x + y * z",
             spanned(Expr::Op(
@@ -451,6 +570,10 @@ mod tests {
                 ))),
             )),
         );
+    }
+
+    #[test]
+    fn test_op_precedence_parentheses_override() {
         assert_ast!(
             "(x + y) * z",
             spanned(Expr::Op(
@@ -466,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn test_let() {
+    fn test_let_simple_int_assignment() {
         assert_ast!(
             "
             let x = 42
@@ -479,6 +602,10 @@ mod tests {
                 Box::new(spanned(Expr::Var("x"))),
             )),
         );
+    }
+
+    #[test]
+    fn test_let_simple_var_assignment() {
         assert_ast!(
             "
             let x = y
@@ -491,6 +618,10 @@ mod tests {
                 Box::new(spanned(Expr::Var("y"))),
             )),
         );
+    }
+
+    #[test]
+    fn test_let_block_assignment_and_usage() {
         assert_ast!(
             "
             let x = {
@@ -511,6 +642,10 @@ mod tests {
                 Box::new(spanned(Expr::Var("x"))),
             )),
         );
+    }
+
+    #[test]
+    fn test_let_with_op_assoc_and_precedence() {
         assert_ast!(
             "
             let opl 0 x = 42
@@ -532,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn test_seq() {
+    fn test_seq_two_vars() {
         assert_ast!(
             "x y",
             spanned(Expr::Seq(
@@ -540,6 +675,10 @@ mod tests {
                 Box::new(spanned(Expr::Var("y"))),
             )),
         );
+    }
+
+    #[test]
+    fn test_seq_call_then_var() {
         assert_ast!(
             "x(y) z",
             spanned(Expr::Seq(

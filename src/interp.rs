@@ -84,7 +84,40 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
 
             eval(body, new_env)?
         }
-        Expr::Op(_, _, _) => unimplemented!(),
+        Expr::Op(e1, op, e2) => match eval(op, env.clone())? {
+            Value::Closure(name, params, body, captured_env) => {
+                if params.len() != 2 {
+                    return Err(Error {
+                        msg: format!(
+                            "Expected 2 parameters for operator {}, but got {}",
+                            name.map(|n| format!("`{n}`"))
+                                .unwrap_or_else(|| "<anonymous>".to_string()),
+                            params.len(),
+                        ),
+                        span: op.1,
+                    });
+                }
+
+                let body = match body.1.end {
+                    0 => Box::new((body.0, op.1)), // Builtin functions have no span
+                    _ => body.clone(),
+                };
+
+                let arg1 = eval(e1, env.clone())?;
+                let arg2 = eval(e2, env.clone())?;
+
+                let mut new_env = env[..captured_env].to_vec();
+                new_env.extend([(params[0], arg1), (params[1], arg2)]);
+
+                eval(&body, new_env)?
+            }
+            v => {
+                return Err(Error {
+                    msg: format!("Expected an operator, but got {v}"),
+                    span: op.1,
+                });
+            }
+        },
         Expr::Let(_, x, e, body) => {
             let mut v = eval(e, env.clone())?;
 
@@ -281,6 +314,46 @@ mod tests {
         ));
 
         assert_eval(expr, env, Value::Float(3.14));
+    }
+
+    #[test]
+    fn test_op() {
+        let env = vec![
+            ("x", Value::Int(42)),
+            ("y", Value::Int(3)),
+            builtin::env().into_iter().find(|(k, _)| *k == "+").unwrap(),
+        ];
+
+        // x + y
+        let expr = spanned(Expr::Op(
+            Box::new(spanned(Expr::Var("x"))),
+            Box::new(spanned(Expr::Var("+"))),
+            Box::new(spanned(Expr::Var("y"))),
+        ));
+
+        assert_eval(expr, env, Value::Int(42 + 3));
+    }
+
+    #[test]
+    fn test_op_ident() {
+        let env = vec![
+            ("x", Value::Int(42)),
+            ("y", Value::Int(3)),
+            builtin::env()
+                .into_iter()
+                .find(|(k, _)| *k == "+")
+                .map(|(_, v)| ("add", v))
+                .unwrap(),
+        ];
+
+        // x add y
+        let expr = spanned(Expr::Op(
+            Box::new(spanned(Expr::Var("x"))),
+            Box::new(spanned(Expr::Var("add"))),
+            Box::new(spanned(Expr::Var("y"))),
+        ));
+
+        assert_eval(expr, env, Value::Int(42 + 3));
     }
 
     #[test]

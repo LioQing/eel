@@ -1,6 +1,6 @@
-let fib = fn(n) case <=(n, 1). {
+let fib = fn(n) case (n <= 1) {
     1 => n
-    _ => +(fib(-(n, 1).)., fib(-(n, 2).).).
+    _ => fib(n - 1). + fib(n - 2).
 }
 
 fib(10). // 55

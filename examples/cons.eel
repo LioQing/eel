@@ -16,16 +16,16 @@ let map = fn(xs, f) {
 }
 
 let list = cons(1, cons(2, cons(3, nil())))
-let doubledList = map(list, fn(x) { x * 2 }).
-let lengthOfList = length(list).
+let doubled_list = map(list, fn(x) { x * 2 }).
+let length_of_list = length(list).
 
 let _ = print(list).
 // cons (x=1, xs=cons (x=2, xs=cons (x=3, xs=nil() { unit }) { unit }) { unit }) { unit }
 
-let _ = print(doubledList).
+let _ = print(doubled_list).
 // cons (x=2, xs=cons (x=4, xs=cons (x=6, xs=nil() { unit }) { unit }) { unit }) { unit }
 
-let _ = print(lengthOfList).
+let _ = print(length_of_list).
 // 3
 
 0

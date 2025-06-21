@@ -27,7 +27,7 @@ For examples:
 
 |     | Eel | C++ |
 | --- | --- | --- |
-| function | `let apply = fn(x, f) { f(x). }` | `template <int X, template <typename> typename F> struct apply { using Eval = typename F<X>::Eval; };` |
+| function | `let apply = fn(x, f) { f(x). }` | `template <typename X, template <typename> typename F> struct apply { using Eval = typename F<X>::Eval; };` |
 | struct | `let x = y` | `using x = y;` |
 | value | `let x = 1` | `constexpr int x = 1;` |
 | function definition | `let f = fn(x) { x }` | `template <typename X> struct f { using Eval = X; };` |
@@ -121,7 +121,7 @@ template <typename X, typename XS>
 struct cons {
     // A printing function so that we can see the value.
     static const std::string to_string() {
-        return "cons (x=" + X().to_string() + ", xs=" + XS().to_string() + ") { unit }";
+        return "cons (x=" + X::to_string() + ", xs=" + XS::to_string() + ") { unit }";
     }
 };
 

@@ -30,7 +30,7 @@ template <typename X, typename XS>
 struct cons {
     // A printing function so that we can see the value.
     static const std::string to_string() {
-        return "cons (x=" + X().to_string() + ", xs=" + XS().to_string() + ") { unit }";
+        return "cons (x=" + X::to_string() + ", xs=" + XS::to_string() + ") { unit }";
     }
 };
 

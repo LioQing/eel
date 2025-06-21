@@ -25,7 +25,7 @@ struct Multiply { using Eval = void; };
 template <int A, int B>
 struct Multiply<Int<A>, Int<B>> { using Eval = Int<A * B>; };
 
-// Following are the actualy translated cons example.
+// Following are the actual translated cons example.
 template <typename X, typename XS>
 struct cons {
     // A printing function so that we can see the value.

@@ -1,6 +1,6 @@
 # Eel
 
-A toy programming language leveraging explicit evaluation to allow evaluating functions to structs, and structs to values.
+A toy programming language leveraging explicit evaluation to allow unifying the declaration of functions and types.
 
 ## Motivation
 
@@ -10,7 +10,9 @@ It was inspired by C++ template metaprogramming, where [class templates](https:/
 
 ## Overview
 
-Eel, being the language inspired by C++ template metaprogramming, is a language that works in essentially the same way. In fact, it should almost be able to transpile to valid C++ template metaprogramming code, the only difference is that it is dynamically typed while C++ template metaprogramming is 'statically [kinded](https://en.wikipedia.org/wiki/Kind_(type_theory))'
+Eel, being the language inspired by C++ template metaprogramming, is a language that works in essentially the same way. In fact, it should almost be able to transpile to valid C++ template metaprogramming code, the only difference is that it is dynamically typed while C++ template metaprogramming is 'statically [kinded](https://en.wikipedia.org/wiki/Kind_(type_theory))'.
+
+The explicitness of Eel is in that it requires programmer to explicitly evaluate functions that already have their arguments applied (called a struct in Eel) to get the return value. This essentially **unifies the declaration of functions and types, and makes the function's identifier also a type identifier, allowing pattern matching on the function's identifier**.
 
 | Eel | C++ |
 | --- | --- |
@@ -29,7 +31,7 @@ For examples:
 | struct | `let x = y` | `using x = y;` |
 | value | `let x = 1` | `constexpr int x = 1;` |
 | function definition | `let f = fn(x) { x }` | `template <typename X> struct f { using Eval = X; };` |
-| function application | `f(x)` | `apply<X, f>` |
+| function application | `f(x)` | `f<X>` |
 | struct evaluation | `x.` | `X::Eval` |
 
 > [!NOTE]
@@ -114,7 +116,7 @@ struct Multiply { using Eval = void; };
 template <int A, int B>
 struct Multiply<Int<A>, Int<B>> { using Eval = Int<A * B>; };
 
-// Following are the actualy translated cons example.
+// Following are the actual translated cons example.
 template <typename X, typename XS>
 struct cons {
     // A printing function so that we can see the value.

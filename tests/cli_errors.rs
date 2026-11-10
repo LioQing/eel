@@ -89,6 +89,41 @@ fn non_utf8_source_fails_without_panicking() {
 }
 
 #[test]
+fn out_of_range_integer_fails_with_source_diagnostic() {
+    for literal in [
+        "9223372036854775808",
+        "-9223372036854775809",
+        "99999999999999999999999999999999999999999999999999",
+    ] {
+        let file = SourceFile::new(literal);
+        let output = file.run();
+        assert_failure(&output, "Invalid integer literal");
+        assert_source_diagnostic(&output, &file.0);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Lexing failed"));
+    }
+}
+
+#[test]
+fn lex_error_prevents_all_program_execution() {
+    for source in [
+        "let _ = print(123456789). 9223372036854775808",
+        "let x = 9223372036854775808 let _ = print(123456789). 0",
+        "let _ = eprint(123456789). -9223372036854775809",
+    ] {
+        let file = SourceFile::new(source);
+        let output = file.run();
+        assert_failure(&output, "Invalid integer literal");
+        assert_source_diagnostic(&output, &file.0);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Lexing failed"), "{stderr}");
+        assert!(
+            !stderr.lines().any(|line| line.trim() == "123456789"),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
 fn syntax_error_fails_with_source_diagnostic() {
     let file = SourceFile::new("let x =");
     let output = file.run();
@@ -162,7 +197,7 @@ fn stderr_program_output_does_not_count_as_failure() {
 }
 
 #[test]
-fn run_api_exposes_source_parse_and_runtime_failure() {
+fn run_api_exposes_failure_stages() {
     let invalid = SourceFile::new("let x =");
     assert!(matches!(eel::run(&invalid.0), Err(eel::RunError::Parse)));
     assert!(matches!(
@@ -174,4 +209,6 @@ fn run_api_exposes_source_parse_and_runtime_failure() {
         eel::run(&runtime_error.0),
         Err(eel::RunError::Runtime)
     ));
+    let lex_error = SourceFile::new("9223372036854775808");
+    assert!(matches!(eel::run(&lex_error.0), Err(eel::RunError::Lex)));
 }

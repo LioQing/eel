@@ -854,6 +854,26 @@ mod tests {
     }
 
     #[test]
+    fn test_inequality_mixed_precedence_and_associativity() {
+        for (src, expected) in [
+            ("2 * 3 + 4 != 10", 0),
+            ("10 != 2 + 3 * 4", 1),
+            ("1 + 2 != 4 * 2", 1),
+            ("1 != 2 < 3", 0),
+            ("1 < 2 != 3 < 4", 0),
+            ("4 < 3 != 2 + 1", 1),
+            ("2 != 2 != 0", 0),
+            ("2 == 2 != 0", 1),
+            ("1 != 2 == 0", 0),
+            ("1.0 + 2.0 != 3.0 * 1.0", 0),
+            ("2 * (3 + 4) != 10", 1),
+            ("!=(2 * 3 + 4, 10).", 0),
+        ] {
+            assert_source_eval(src, expected);
+        }
+    }
+
+    #[test]
     fn test_declared_left_and_right_associativity() {
         assert_source_eval("let opl 1 sub = fn(a, b) { a - b } 10 sub 3 sub 2", 5);
         assert_source_eval("let opr 1 sub = fn(a, b) { a - b } 10 sub 3 sub 2", 9);

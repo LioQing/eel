@@ -30,9 +30,7 @@ pub fn lexer<'src>()
         .or_not()
         .then(text::int(10))
         .to_slice()
-        .from_str()
-        .unwrapped()
-        .map(Token::Int);
+        .map(|s: &str| s.parse::<i64>().map(Token::Int));
 
     let ctrl = choice((
         just('(').to(Token::OpenParen),
@@ -63,7 +61,13 @@ pub fn lexer<'src>()
             _ => Token::Ident(s),
         });
 
-    let tok = choice((float, int, ctrl, keyword, ident));
+    let tok = choice((
+        float.map(Ok),
+        int,
+        ctrl.map(Ok),
+        keyword.map(Ok),
+        ident.map(Ok),
+    ));
 
     let comment = just("//")
         .then(any().and_is(just('\n').not()).repeated())
@@ -74,7 +78,18 @@ pub fn lexer<'src>()
         .padded()
         .recover_with(skip_then_retry_until(any().ignored(), end()))
         .repeated()
-        .collect()
+        .collect::<Vec<_>>()
+        // Validate after tokenization so invalid integers cannot fall back to identifiers
+        // or recover into executable fragments of the original literal.
+        .try_map(|toks, _| {
+            toks.into_iter()
+                .map(|(tok, span)| {
+                    tok.map(|tok| (tok, span)).map_err(|err| {
+                        Rich::custom(span, format!("Invalid integer literal: {err}"))
+                    })
+                })
+                .collect()
+        })
 }
 
 #[cfg(test)]
@@ -140,6 +155,59 @@ mod tests {
             Token::Int(123),
             Token::Int(-456),
             Token::Int(7890),
+        );
+    }
+
+    #[test]
+    fn test_int_boundaries() {
+        assert_lex!(
+            "9223372036854775807 -9223372036854775808 0 -0",
+            Token::Int(i64::MAX),
+            Token::Int(i64::MIN),
+            Token::Int(0),
+            Token::Int(0),
+        );
+    }
+
+    #[test]
+    fn test_int_out_of_range() {
+        for literal in [
+            "9223372036854775808",
+            "-9223372036854775809",
+            "18446744073709551615",
+            "99999999999999999999999999999999999999999999999999",
+            "-99999999999999999999999999999999999999999999999999",
+        ] {
+            for (prefix, suffix) in [("", ""), ("print(", ")."), ("let x = ", " 42")] {
+                let src = format!("{prefix}{literal}{suffix}");
+                let (toks, errs) = lexer().parse(&src).into_output_errors();
+
+                assert!(toks.is_none(), "Invalid integer produced tokens: {src}");
+                assert_eq!(errs.len(), 1, "{src}: {errs:?}");
+                assert_eq!(
+                    errs[0].span().into_range(),
+                    prefix.len()..prefix.len() + literal.len(),
+                    "{src}",
+                );
+                assert!(
+                    errs[0]
+                        .reason()
+                        .to_string()
+                        .contains("Invalid integer literal"),
+                    "{src}: {:?}",
+                    errs[0],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_large_float_literals_remain_valid() {
+        assert_lex!(
+            "9223372036854775808.0 -9223372036854775809.0 1e999",
+            Token::Float(9223372036854775808.0),
+            Token::Float(-9223372036854775809.0),
+            Token::Float(f64::INFINITY),
         );
     }
 

@@ -44,6 +44,10 @@ For examples:
 - **Functional**: Supports first-class functions and higher-order functions without mutable bindings. Eel is not completely side-effect-free: `print` and `eprint` perform observable I/O on standard output and standard error, respectively.
 - **Dynamically Typed**: Types are checked at runtime, allowing for flexibility in function definitions and calls.
 
+### Integer Arithmetic
+
+Integers are signed 64-bit values, from `-9223372036854775808` to `9223372036854775807`. Out-of-range integer literals and overflow in integer `+`, `-`, `*`, `/`, and `%` produce language errors in both debug and release builds, rather than panicking or wrapping. Integer division and remainder by zero are errors, as are `-9223372036854775808 / -1` and `-9223372036854775808 % -1`. Arithmetic does not implicitly mix integers and floats.
+
 ## Example
 
 Here is a simple [cons](https://en.wikipedia.org/wiki/Cons) implementation in Eel:

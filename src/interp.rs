@@ -1,4 +1,20 @@
+use std::rc::Rc;
+
 use crate::declare::*;
+
+fn closure_env<'src>(closure: &Value<'src>) -> Env<'src> {
+    let Value::Closure(name, _, _, captured_env) = closure else {
+        unreachable!();
+    };
+
+    let mut env = captured_env.as_ref().clone();
+    if let Some(name) = name {
+        // Recreate the recursive binding when applying the closure, so its
+        // retained environment never needs to contain a cycle back to itself.
+        env.push((name, closure.clone()));
+    }
+    env
+}
 
 pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'src>, Error> {
     Ok(match &expr.0 {
@@ -14,7 +30,11 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 span: expr.1.clone(),
             })?,
         Expr::Call(f, args) => match eval(f, env.clone())? {
-            Value::Closure(name, params, body, captured_env) => {
+            closure @ Value::Closure(..) => {
+                let captured_env = Rc::new(closure_env(&closure));
+                let Value::Closure(name, params, body, _) = closure else {
+                    unreachable!();
+                };
                 if params.len() != args.0.len() {
                     return Err(Error {
                         msg: format!(
@@ -28,10 +48,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let body = match body.1.end {
-                    0 => Box::new((body.0, f.1.clone())), // Builtin functions have no span
-                    _ => body.clone(),
-                };
+                let body = crate::builtin::body_at_call_site(body, f.1);
 
                 let args_env = params
                     .iter()
@@ -54,7 +71,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let mut new_env = env[..captured_env].to_vec();
+                let mut new_env = captured_env.as_ref().clone();
                 new_env.extend(args_env);
 
                 eval(&body, new_env)?
@@ -66,7 +83,9 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 });
             }
         },
-        Expr::Fn(params, body) => Value::Closure(None, params.0.clone(), body.clone(), env.len()),
+        Expr::Fn(params, body) => {
+            Value::Closure(None, params.0.clone(), body.clone(), Rc::new(env))
+        }
         Expr::Case(e, arms) => {
             let v = eval(e, env.clone())?;
 
@@ -85,7 +104,11 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
             eval(body, new_env)?
         }
         Expr::Op(e1, op, e2) => match eval(op, env.clone())? {
-            Value::Closure(name, params, body, captured_env) => {
+            closure @ Value::Closure(..) => {
+                let mut new_env = closure_env(&closure);
+                let Value::Closure(name, params, body, _) = closure else {
+                    unreachable!();
+                };
                 if params.len() != 2 {
                     return Err(Error {
                         msg: format!(
@@ -98,15 +121,11 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let body = match body.1.end {
-                    0 => Box::new((body.0, op.1)), // Builtin functions have no span
-                    _ => body.clone(),
-                };
+                let body = crate::builtin::body_at_call_site(body, op.1);
 
                 let arg1 = eval(e1, env.clone())?;
                 let arg2 = eval(e2, env.clone())?;
 
-                let mut new_env = env[..captured_env].to_vec();
                 new_env.extend([(params[0], arg1), (params[1], arg2)]);
 
                 eval(&body, new_env)?
@@ -121,9 +140,17 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
         Expr::Let(_, x, e, body) => {
             let mut v = eval(e, env.clone())?;
 
-            if let Value::Closure(name, _, _, new_env) = &mut v {
+            let recursive_binding = match &v {
+                Value::Closure(Some(name), _, _, _) if name != x => Some((*name, v.clone())),
+                _ => None,
+            };
+            if let Value::Closure(name, _, _, captured_env) = &mut v {
+                // An alias keeps the original function's recursive binding,
+                // even though its display and struct name follow the new let.
+                if let Some(binding) = recursive_binding {
+                    Rc::make_mut(captured_env).push(binding);
+                }
                 *name = Some(x);
-                *new_env += 1;
             }
 
             let mut new_env = env;
@@ -140,6 +167,10 @@ pub fn match_patt<'src>(patt: &Patt<'src>, value: &Value<'src>) -> Option<Env<'s
         (Patt::Lit(p), v) if p == v => Some(vec![]),
         (Patt::Var(x), _) => Some(vec![(x, value.clone())]),
         (Patt::Struct(x, ps), Value::Struct(y, _, args_env, _)) if Some(*x) == *y => {
+            if ps.0.len() != args_env.len() {
+                return None;
+            }
+
             let mut env = vec![];
             for ((p, _), (_, v)) in ps.0.iter().zip(args_env.iter()) {
                 if let Some(new_env) = match_patt(p, v) {
@@ -154,6 +185,12 @@ pub fn match_patt<'src>(patt: &Patt<'src>, value: &Value<'src>) -> Option<Env<'s
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod lexical_capture_tests;
+
+#[cfg(test)]
+mod pattern_tests;
 
 #[cfg(test)]
 mod tests {
@@ -203,7 +240,12 @@ mod tests {
             ("y", Value::Float(3.14)),
             (
                 "id",
-                Value::Closure(Some("id"), vec!["y"], Box::new(spanned(Expr::Var("y"))), 0),
+                Value::Closure(
+                    Some("id"),
+                    vec!["y"],
+                    Box::new(spanned(Expr::Var("y"))),
+                    Default::default(),
+                ),
             ),
         ];
 
@@ -221,13 +263,16 @@ mod tests {
 
     #[test]
     fn test_call_closure() {
+        let id = Value::Closure(
+            Some("id"),
+            vec!["y"],
+            Box::new(spanned(Expr::Var("y"))),
+            Default::default(),
+        );
         let env = vec![
             ("x", Value::Int(42)),
             ("y", Value::Float(3.14)),
-            (
-                "id",
-                Value::Closure(Some("id"), vec!["y"], Box::new(spanned(Expr::Var("y"))), 0),
-            ),
+            ("id", id.clone()),
         ];
 
         // id(x)
@@ -243,7 +288,7 @@ mod tests {
                 Some("id"),
                 Box::new(spanned(Expr::Var("y"))),
                 vec![("y", Value::Int(42))],
-                0,
+                Rc::new(vec![("id", id)]),
             ),
         );
     }
@@ -259,7 +304,7 @@ mod tests {
                     Some("x_struct"),
                     Box::new(spanned(Expr::Var("x"))),
                     vec![("x", Value::Int(43))],
-                    2,
+                    Rc::new(vec![("x", Value::Int(42)), ("y", Value::Float(3.14))]),
                 ),
             ),
         ];
@@ -285,8 +330,13 @@ mod tests {
 
         assert_eval(
             expr,
-            env,
-            Value::Closure(None, vec!["y"], Box::new(spanned(Expr::Var("y"))), 2),
+            env.clone(),
+            Value::Closure(
+                None,
+                vec!["y"],
+                Box::new(spanned(Expr::Var("y"))),
+                Rc::new(env),
+            ),
         );
     }
 
@@ -369,8 +419,13 @@ mod tests {
 
         assert_eval(
             expr,
-            env,
-            Value::Closure(Some("id"), vec!["y"], Box::new(spanned(Expr::Var("y"))), 3),
+            env.clone(),
+            Value::Closure(
+                Some("id"),
+                vec!["y"],
+                Box::new(spanned(Expr::Var("y"))),
+                Rc::new(env),
+            ),
         );
     }
 

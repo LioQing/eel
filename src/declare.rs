@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, rc::Rc};
 
 use chumsky::prelude::*;
 
@@ -95,13 +95,13 @@ pub enum Value<'src> {
         Option<&'src str>,
         Vec<&'src str>,
         Box<Spanned<Expr<'src>>>,
-        usize,
+        Rc<Env<'src>>,
     ),
     Struct(
         Option<&'src str>,
         Box<Spanned<Expr<'src>>>,
         Env<'src>,
-        usize,
+        Rc<Env<'src>>,
     ),
 }
 

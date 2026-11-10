@@ -48,10 +48,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let body = match body.1.end {
-                    0 => Box::new((body.0, f.1.clone())), // Builtin functions have no span
-                    _ => body.clone(),
-                };
+                let body = crate::builtin::body_at_call_site(body, f.1);
 
                 let args_env = params
                     .iter()
@@ -124,10 +121,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let body = match body.1.end {
-                    0 => Box::new((body.0, op.1)), // Builtin functions have no span
-                    _ => body.clone(),
-                };
+                let body = crate::builtin::body_at_call_site(body, op.1);
 
                 let arg1 = eval(e1, env.clone())?;
                 let arg2 = eval(e2, env.clone())?;
@@ -173,6 +167,10 @@ pub fn match_patt<'src>(patt: &Patt<'src>, value: &Value<'src>) -> Option<Env<'s
         (Patt::Lit(p), v) if p == v => Some(vec![]),
         (Patt::Var(x), _) => Some(vec![(x, value.clone())]),
         (Patt::Struct(x, ps), Value::Struct(y, _, args_env, _)) if Some(*x) == *y => {
+            if ps.0.len() != args_env.len() {
+                return None;
+            }
+
             let mut env = vec![];
             for ((p, _), (_, v)) in ps.0.iter().zip(args_env.iter()) {
                 if let Some(new_env) = match_patt(p, v) {
@@ -190,6 +188,9 @@ pub fn match_patt<'src>(patt: &Patt<'src>, value: &Value<'src>) -> Option<Env<'s
 
 #[cfg(test)]
 mod lexical_capture_tests;
+
+#[cfg(test)]
+mod pattern_tests;
 
 #[cfg(test)]
 mod tests {

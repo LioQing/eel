@@ -41,7 +41,7 @@ For examples:
 ## Features
 
 - **Explicit Evaluation**: Functions can be evaluated to structs, and structs can be evaluated to values.
-- **Purely Functional**: Supports first-class functions and higher-order functions, with absolutely no side effects and mutability.
+- **Functional**: Supports first-class functions and higher-order functions without mutable bindings. Eel is not completely side-effect-free: `print` and `eprint` perform observable I/O on standard output and standard error, respectively.
 - **Dynamically Typed**: Types are checked at runtime, allowing for flexibility in function definitions and calls.
 
 ## Example

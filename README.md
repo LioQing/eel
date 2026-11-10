@@ -44,6 +44,29 @@ For examples:
 - **Functional**: Supports first-class functions and higher-order functions without mutable bindings. Eel is not completely side-effect-free: `print` and `eprint` perform observable I/O on standard output and standard error, respectively.
 - **Dynamically Typed**: Types are checked at runtime, allowing for flexibility in function definitions and calls.
 
+### Operators
+
+`let opl 1 sub = fn(a, b) { a - b }` declares a left-associative operator:
+`10 sub 3 sub 2` is `(10 sub 3) sub 2`, or `5`. Use `opr` for right
+associativity, which makes the same chain `10 sub (3 sub 2)`, or `9`.
+Higher numeric precedence binds more tightly. Parentheses override both rules,
+and function application and explicit evaluation bind more tightly than operators.
+
+Builtin operators are left-associative, with these precedences:
+
+| Precedence | Operators |
+| --- | --- |
+| 4 | `*`, `/`, `%` |
+| 3 | `+`, `-` |
+| 2 | `<`, `<=`, `>`, `>=` |
+| 1 | `==`, `!=` |
+
+Other operators default to left associativity and precedence `0`. When operators
+of equal precedence have different associativities, the following operator's
+associativity decides the grouping. Fixity follows lexical bindings, including
+recursive function bodies, and inner declarations do not affect outer or sibling
+expressions. A new binding without `opl` or `opr` uses the default fixity.
+
 ## Example
 
 Here is a simple [cons](https://en.wikipedia.org/wiki/Cons) implementation in Eel:

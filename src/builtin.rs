@@ -1,6 +1,6 @@
 use chumsky::prelude::*;
 
-use crate::{ast, declare::*, lex};
+use crate::declare::*;
 
 macro_rules! builtin {
     ($name:literal $expr:ident $env:ident [$($param:ident),* $(,)?] => $body:expr) => {
@@ -26,16 +26,16 @@ macro_rules! builtin {
                     )*
                     $body
                 }), 0..0)),
-                0,
+                Default::default(),
             ),
         )
     };
     ($name:literal $expr:ident $env:ident [$($param:ident),* $(,)?] in $body:literal) => {{
         let src = $body;
 
-        let toks = lex::lexer().parse(src).unwrap();
+        let toks = crate::lex::lexer().parse(src).unwrap();
 
-        let ast = ast::expr_parser()
+        let ast = crate::ast::expr_parser()
             .parse_with_state(
                 toks.as_slice()
                     .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
@@ -49,10 +49,70 @@ macro_rules! builtin {
                 Some($name),
                 vec![$(stringify!($param)),*],
                 Box::new(Spanned::new(ast.0, 0..0)),
-                0,
+                Default::default(),
             ),
         )
     }}
+}
+
+pub fn body_at_call_site<'src>(
+    mut body: Box<Spanned<Expr<'src>>>,
+    span: Span,
+) -> Box<Spanned<Expr<'src>>> {
+    // Builtin bodies use an empty outer span to mark their internal source.
+    // None of their descendant spans may be interpreted as user-source offsets.
+    if body.1.end == 0 {
+        set_expr_span(&mut body, span);
+    }
+    body
+}
+
+fn set_expr_span(expr: &mut Spanned<Expr<'_>>, span: Span) {
+    expr.1 = span;
+    match &mut expr.0 {
+        Expr::Call(func, args) => {
+            set_expr_span(func, span);
+            args.1 = span;
+            for arg in &mut args.0 {
+                set_expr_span(arg, span);
+            }
+        }
+        Expr::Fn(params, body) => {
+            params.1 = span;
+            set_expr_span(body, span);
+        }
+        Expr::Case(expr, arms) => {
+            set_expr_span(expr, span);
+            arms.1 = span;
+            for (patt, body) in &mut arms.0 {
+                set_patt_span(patt, span);
+                set_expr_span(body, span);
+            }
+        }
+        Expr::Op(left, op, right) => {
+            set_expr_span(left, span);
+            set_expr_span(op, span);
+            set_expr_span(right, span);
+        }
+        Expr::Let(_, _, assign, body) => {
+            set_expr_span(assign, span);
+            set_expr_span(body, span);
+        }
+        Expr::Err | Expr::Lit(_) | Expr::Var(_) | Expr::Builtin(_) => {}
+    }
+}
+
+fn set_patt_span(patt: &mut Spanned<Patt<'_>>, span: Span) {
+    patt.1 = span;
+    match &mut patt.0 {
+        Patt::Struct(_, fields) => {
+            fields.1 = span;
+            for field in &mut fields.0 {
+                set_patt_span(field, span);
+            }
+        }
+        Patt::Var(_) | Patt::Lit(_) => {}
+    }
 }
 
 pub fn env<'src>() -> Env<'src> {
@@ -67,7 +127,12 @@ pub fn env<'src>() -> Env<'src> {
         }),
         builtin!("+" expr env [a, b] => {
             match (a, b) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
+                (Value::Int(a), Value::Int(b)) => a.checked_add(*b)
+                    .map(Value::Int)
+                    .ok_or_else(|| Error {
+                        msg: format!("Integer overflow: {a} + {b}"),
+                        span: expr.1.clone(),
+                    }),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 _ => Err(Error {
                     msg: format!("Cannot add {a} and {b}"),
@@ -77,7 +142,12 @@ pub fn env<'src>() -> Env<'src> {
         }),
         builtin!("-" expr env [a, b] => {
             match (a, b) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
+                (Value::Int(a), Value::Int(b)) => a.checked_sub(*b)
+                    .map(Value::Int)
+                    .ok_or_else(|| Error {
+                        msg: format!("Integer overflow: {a} - {b}"),
+                        span: expr.1.clone(),
+                    }),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
                 _ => Err(Error {
                     msg: format!("Cannot subtract {b} from {a}"),
@@ -87,7 +157,12 @@ pub fn env<'src>() -> Env<'src> {
         }),
         builtin!("*" expr env [a, b] => {
             match (a, b) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
+                (Value::Int(a), Value::Int(b)) => a.checked_mul(*b)
+                    .map(Value::Int)
+                    .ok_or_else(|| Error {
+                        msg: format!("Integer overflow: {a} * {b}"),
+                        span: expr.1.clone(),
+                    }),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
                 _ => Err(Error {
                     msg: format!("Cannot multiply {a} and {b}"),
@@ -97,7 +172,12 @@ pub fn env<'src>() -> Env<'src> {
         }),
         builtin!("/" expr env [a, b] => {
             match (a, b) {
-                (Value::Int(a), Value::Int(b)) if *b != 0 => Ok(Value::Int(a / b)),
+                (Value::Int(a), Value::Int(b)) if *b != 0 => a.checked_div(*b)
+                    .map(Value::Int)
+                    .ok_or_else(|| Error {
+                        msg: format!("Integer overflow: {a} / {b}"),
+                        span: expr.1.clone(),
+                    }),
                 (Value::Float(a), Value::Float(b)) if *b != 0.0 => Ok(Value::Float(a / b)),
                 _ => Err(Error {
                     msg: format!("Cannot divide {a} by {b}"),
@@ -107,7 +187,12 @@ pub fn env<'src>() -> Env<'src> {
         }),
         builtin!("%" expr env [a, b] => {
             match (a, b) {
-                (Value::Int(a), Value::Int(b)) if *b != 0 => Ok(Value::Int(a % b)),
+                (Value::Int(a), Value::Int(b)) if *b != 0 => a.checked_rem(*b)
+                    .map(Value::Int)
+                    .ok_or_else(|| Error {
+                        msg: format!("Integer overflow: {a} % {b}"),
+                        span: expr.1.clone(),
+                    }),
                 _ => Err(Error {
                     msg: format!("Cannot modulo {a} by {b}"),
                     span: expr.1.clone(),
@@ -125,7 +210,17 @@ pub fn env<'src>() -> Env<'src> {
                 }),
             }
         }),
-        builtin!("!=" expr env [a, b] in "case ==(a, b)() { 0 => 1 _ => 0 }" ),
+        builtin!("!=" expr env [a, b] => {
+            match (a, b) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a != b { 1 } else { 0 })),
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a != b { 1 } else { 0 })),
+                (Value::Unit, Value::Unit) => Ok(Value::Int(0)),
+                _ => Err(Error {
+                    msg: format!("Cannot compare {a} and {b} for inequality"),
+                    span: expr.1.clone(),
+                }),
+            }
+        }),
         builtin!(">" expr env [a, b] => {
             match (a, b) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a > b { 1 } else { 0 })),
@@ -167,4 +262,359 @@ pub fn env<'src>() -> Env<'src> {
             }
         }),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use ariadne::{Label, Report, ReportKind, sources};
+
+    use super::*;
+    use crate::{ast, interp, lex};
+
+    fn parse<'src>(src: &'src str, span: Option<Span>) -> Spanned<Expr<'src>> {
+        let toks = lex::lexer().parse(src).unwrap();
+        ast::expr_parser()
+            .parse_with_state(
+                toks.as_slice().map(
+                    span.unwrap_or_else(|| (src.len()..src.len()).into()),
+                    |(t, s)| (t, span.as_ref().unwrap_or(s)),
+                ),
+                &mut extra::SimpleState(vec![]),
+            )
+            .unwrap()
+    }
+
+    fn assert_call_error<'src>(
+        src: &'src str,
+        builtin: (&'src str, Value<'src>),
+        expected: Span,
+        msg: &str,
+    ) {
+        let error = interp::eval(&parse(src, None), vec![builtin]).unwrap_err();
+        assert_eq!(error.msg, msg);
+        assert_eq!(error.span, expected);
+        assert!(src.get(error.span.into_range()).is_some());
+
+        // Exercise Ariadne's byte-indexed rendering, not only the error payload.
+        let mut output = Vec::new();
+        Report::build(ReportKind::Error, ("caller", error.span.into_range()))
+            .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
+            .with_message(&error.msg)
+            .with_label(Label::new(("caller", error.span.into_range())).with_message(&error.msg))
+            .finish()
+            .write(sources([("caller", src)]), &mut output)
+            .unwrap();
+        assert!(String::from_utf8(output).unwrap().contains(msg));
+    }
+
+    #[test]
+    fn eel_builtin_errors_use_infix_and_prefix_call_sites() {
+        for (src, span) in [("1 b 2", 2..3), ("b(1, 2)()", 0..1)] {
+            assert_call_error(
+                src,
+                builtin!("b" expr env [a, b] in "case a { _ => missing_internal }"),
+                span.into(),
+                "Variable `missing_internal` not found",
+            );
+        }
+    }
+
+    #[test]
+    fn eel_builtin_errors_use_utf8_call_site_boundaries() {
+        for (src, span) in [("1 🦀 2", 2..6), ("🦀(1, 2)()", 0..4)] {
+            // The internal operator's 2..5 span would split the caller's emoji.
+            assert_call_error(
+                src,
+                builtin!("🦀" expr env [a, b] in "a bad b"),
+                span.into(),
+                "Variable `bad` not found",
+            );
+        }
+    }
+
+    #[test]
+    fn eel_builtin_remaps_every_parsed_ast_span() {
+        let src = "
+            let combine = fn(x, y) {
+                case x {
+                    pair(head, tail(rest)) => { y + head }
+                    0 => 1
+                    _ => y
+                }
+            }
+            combine(a, b)()
+        ";
+        let mut body = parse(src, None);
+        body.1 = (0..0).into();
+        let call_span = (13..17).into();
+
+        assert_eq!(
+            *body_at_call_site(Box::new(body), call_span),
+            parse(src, Some(call_span)),
+        );
+    }
+
+    #[test]
+    fn user_function_body_spans_are_preserved() {
+        let body = Box::new(parse("fn(x) { missing(x) }", None));
+        assert_eq!(body_at_call_site(body.clone(), (30..34).into()), body);
+    }
+
+    #[test]
+    fn returned_eel_builtin_function_keeps_original_call_site() {
+        assert_call_error(
+            "let f = b()() f(0)()",
+            builtin!("b" expr env [] in "fn(x) { missing_internal(x) }"),
+            (8..9).into(),
+            "Variable `missing_internal` not found",
+        );
+    }
+
+    #[test]
+    fn eel_builtin_calls_do_not_reuse_previous_call_spans() {
+        assert_call_error(
+            "let _ = b(0, 2)() b(1, 2)()",
+            builtin!("b" expr env [a, b] in "case a { 0 => 0 _ => missing_internal }"),
+            (18..19).into(),
+            "Variable `missing_internal` not found",
+        );
+    }
+
+    fn eval_src(src: &str) -> Result<Value<'_>, Error> {
+        let toks = lex::lexer().parse(src).unwrap();
+        let expr = ast::expr_parser()
+            .parse_with_state(
+                toks.as_slice()
+                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+                &mut extra::SimpleState(vec![]),
+            )
+            .unwrap();
+
+        interp::eval(&expr, env())
+    }
+
+    #[test]
+    fn test_integer_arithmetic_boundaries() {
+        for (a, op, b, expected) in [
+            (i64::MAX, "+", 0, i64::MAX),
+            (i64::MIN, "+", 0, i64::MIN),
+            (i64::MAX, "+", i64::MIN, -1),
+            (i64::MAX, "+", -1, i64::MAX - 1),
+            (i64::MIN, "+", 1, i64::MIN + 1),
+            (i64::MAX, "-", 0, i64::MAX),
+            (i64::MIN, "-", 0, i64::MIN),
+            (-1, "-", i64::MAX, i64::MIN),
+            (i64::MIN, "-", -1, i64::MIN + 1),
+            (i64::MAX, "-", i64::MAX, 0),
+            (i64::MAX, "*", 1, i64::MAX),
+            (i64::MIN, "*", 1, i64::MIN),
+            (i64::MAX, "*", 0, 0),
+            (i64::MIN, "*", 0, 0),
+            (i64::MAX, "*", -1, -i64::MAX),
+            (i64::MIN, "/", 1, i64::MIN),
+            (i64::MAX, "/", -1, -i64::MAX),
+            (i64::MIN, "/", i64::MIN, 1),
+            (0, "/", -1, 0),
+            (7, "/", -3, -2),
+            (-7, "/", 3, -2),
+            (-7, "/", -3, 2),
+            (i64::MIN, "%", 1, 0),
+            (i64::MIN, "%", i64::MIN, 0),
+            (i64::MAX, "%", -1, 0),
+            (0, "%", -1, 0),
+            (-7, "%", 3, -1),
+            (7, "%", -3, 1),
+        ] {
+            for src in [format!("{a} {op} {b}"), format!("{op}({a}, {b}).")] {
+                assert_eq!(eval_src(&src), Ok(Value::Int(expected)), "{src}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_integer_arithmetic_overflow() {
+        for (a, op, b) in [
+            (i64::MAX, "+", 1),
+            (1, "+", i64::MAX),
+            (i64::MIN, "+", -1),
+            (-1, "+", i64::MIN),
+            (i64::MAX, "+", i64::MAX),
+            (i64::MIN, "+", i64::MIN),
+            (i64::MIN, "-", 1),
+            (i64::MAX, "-", -1),
+            (0, "-", i64::MIN),
+            (i64::MAX, "-", i64::MIN),
+            (i64::MAX, "*", 2),
+            (2, "*", i64::MAX),
+            (i64::MIN, "*", 2),
+            (i64::MIN, "*", -1),
+            (-1, "*", i64::MIN),
+            (i64::MIN, "*", i64::MIN),
+            (i64::MIN, "/", -1),
+            (i64::MIN, "%", -1),
+        ] {
+            let infix_span = a.to_string().len() + 1..a.to_string().len() + 1 + op.len();
+            for (src, span) in [
+                (format!("{a} {op} {b}"), infix_span),
+                (format!("{op}({a}, {b})."), 0..op.len()),
+            ] {
+                assert_eq!(
+                    eval_src(&src),
+                    Err(Error {
+                        msg: format!("Integer overflow: {a} {op} {b}"),
+                        span: span.into(),
+                    }),
+                    "{src}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_integer_zero_divisors() {
+        for a in [i64::MIN, -1, 0, 1, i64::MAX] {
+            for (op, action) in [("/", "divide"), ("%", "modulo")] {
+                for src in [format!("{a} {op} 0"), format!("{op}({a}, 0).")] {
+                    let err = eval_src(&src).unwrap_err();
+                    assert_eq!(err.msg, format!("Cannot {action} {a} by 0"), "{src}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_inequality_supported_values() {
+        for (a, b, unequal) in [
+            ("1", "2", 1),
+            ("2", "1", 1),
+            ("1", "1", 0),
+            ("-2", "-2", 0),
+            ("-2", "2", 1),
+            ("1.0", "2.0", 1),
+            ("1.0", "1.0", 0),
+            ("0.0", "-0.0", 0),
+            ("unit", "unit", 0),
+        ] {
+            for (op, expected) in [("!=", unequal), ("==", 1 - unequal)] {
+                for src in [
+                    format!("{a} {op} {b}"),
+                    format!("{op}({a}, {b})."),
+                    format!("{op}({a}, {b})()"),
+                ] {
+                    assert_eq!(eval_src(&src), Ok(Value::Int(expected)), "{src}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_overflow_in_deferred_and_nested_evaluation() {
+        for src in [
+            "let x = 9223372036854775807 let y = 1 x + y",
+            "let add = + let sum = add(9223372036854775807, 1) sum.",
+            "let f = fn(x) { x * 2 } f(9223372036854775807).",
+            "0 + (9223372036854775807 + 1)",
+        ] {
+            let err = eval_src(src).unwrap_err();
+            assert!(err.msg.starts_with("Integer overflow:"), "{src}: {err:?}");
+            assert!(err.span.start < err.span.end, "{src}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn test_float_arithmetic_unchanged() {
+        for (src, expected) in [
+            ("1.5 + 2.5", 4.0),
+            ("1.5 - 2.5", -1.0),
+            ("1.5 * 2.0", 3.0),
+            ("7.0 / -2.0", -3.5),
+            ("1e308 * 1e308", f64::INFINITY),
+            ("-1e308 * 1e308", f64::NEG_INFINITY),
+        ] {
+            assert_eq!(eval_src(src), Ok(Value::Float(expected)), "{src}");
+        }
+
+        assert!(matches!(
+            eval_src("1e999 - 1e999"),
+            Ok(Value::Float(value)) if value.is_nan()
+        ));
+
+        for src in ["1.0 / 0.0", "1.0 / -0.0", "0.0 / 0.0"] {
+            let err = eval_src(src).unwrap_err();
+            assert!(err.msg.starts_with("Cannot divide"), "{src}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn test_arithmetic_type_policy_unchanged() {
+        for (op, action) in [
+            ("+", "add"),
+            ("-", "subtract"),
+            ("*", "multiply"),
+            ("/", "divide"),
+            ("%", "modulo"),
+        ] {
+            for (a, b) in [("1", "2.0"), ("1.0", "2"), ("unit", "1"), ("1", "unit")] {
+                let src = format!("{a} {op} {b}");
+                let err = eval_src(&src).unwrap_err();
+                assert!(
+                    err.msg.starts_with(&format!("Cannot {action}")),
+                    "{src}: {err:?}",
+                );
+            }
+        }
+
+        assert_eq!(
+            eval_src("1.0 % 2.0").unwrap_err().msg,
+            "Cannot modulo 1 by 2",
+        );
+    }
+
+    #[test]
+    fn test_inequality_rejects_unsupported_values() {
+        for (a, b) in [
+            ("1", "1.0"),
+            ("1.0", "1"),
+            ("unit", "1"),
+            ("1", "unit"),
+            ("unit", "1.0"),
+            ("1.0", "unit"),
+            ("(fn(x) { x })", "(fn(x) { x })"),
+            ("+(1, 2)", "+(1, 2)"),
+            ("(fn(x) { x })", "1"),
+            ("1", "+(1, 2)"),
+        ] {
+            for (op, comparison) in [("!=", "inequality"), ("==", "equality")] {
+                for src in [
+                    format!("{a} {op} {b}"),
+                    format!("{op}({a}, {b})."),
+                    format!("{op}({a}, {b})()"),
+                ] {
+                    let err = eval_src(&src).expect_err(&src);
+                    assert!(err.msg.starts_with("Cannot compare "), "{src}: {err:?}");
+                    assert!(
+                        err.msg.ends_with(&format!(" for {comparison}")),
+                        "{src}: {err:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_inequality_application_remains_explicit() {
+        for src in ["!=(1, 2)", "!=(1, 1.0)"] {
+            assert!(
+                matches!(eval_src(src), Ok(Value::Struct(Some("!="), _, _, _))),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_inequality_does_not_depend_on_shadowed_equality() {
+        let src = "let == = fn(a, b) { 0 } 1 != 1";
+
+        assert_eq!(eval_src(src), Ok(Value::Int(0)));
+    }
 }

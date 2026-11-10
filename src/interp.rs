@@ -28,10 +28,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let body = match body.1.end {
-                    0 => Box::new((body.0, f.1.clone())), // Builtin functions have no span
-                    _ => body.clone(),
-                };
+                let body = crate::builtin::body_at_call_site(body, f.1);
 
                 let args_env = params
                     .iter()
@@ -98,10 +95,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let body = match body.1.end {
-                    0 => Box::new((body.0, op.1)), // Builtin functions have no span
-                    _ => body.clone(),
-                };
+                let body = crate::builtin::body_at_call_site(body, op.1);
 
                 let arg1 = eval(e1, env.clone())?;
                 let arg2 = eval(e2, env.clone())?;

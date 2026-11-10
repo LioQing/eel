@@ -48,6 +48,29 @@ For examples:
 
 Integers are signed 64-bit values, from `-9223372036854775808` to `9223372036854775807`. Out-of-range integer literals and overflow in integer `+`, `-`, `*`, `/`, and `%` produce language errors in both debug and release builds, rather than panicking or wrapping. Integer division and remainder by zero are errors, as are `-9223372036854775808 / -1` and `-9223372036854775808 % -1`. Arithmetic does not implicitly mix integers and floats.
 
+### Operators
+
+`let opl 1 sub = fn(a, b) { a - b }` declares a left-associative operator:
+`10 sub 3 sub 2` is `(10 sub 3) sub 2`, or `5`. Use `opr` for right
+associativity, which makes the same chain `10 sub (3 sub 2)`, or `9`.
+Higher numeric precedence binds more tightly. Parentheses override both rules,
+and function application and explicit evaluation bind more tightly than operators.
+
+Builtin operators are left-associative, with these precedences:
+
+| Precedence | Operators |
+| --- | --- |
+| 4 | `*`, `/`, `%` |
+| 3 | `+`, `-` |
+| 2 | `<`, `<=`, `>`, `>=` |
+| 1 | `==`, `!=` |
+
+Other operators default to left associativity and precedence `0`. When operators
+of equal precedence have different associativities, the following operator's
+associativity decides the grouping. Fixity follows lexical bindings, including
+recursive function bodies, and inner declarations do not affect outer or sibling
+expressions. A new binding without `opl` or `opr` uses the default fixity.
+
 ## Example
 
 Here is a simple [cons](https://en.wikipedia.org/wiki/Cons) implementation in Eel:

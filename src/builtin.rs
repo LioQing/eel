@@ -26,7 +26,7 @@ macro_rules! builtin {
                     )*
                     $body
                 }), 0..0)),
-                0,
+                Default::default(),
             ),
         )
     };
@@ -49,7 +49,7 @@ macro_rules! builtin {
                 Some($name),
                 vec![$(stringify!($param)),*],
                 Box::new(Spanned::new(ast.0, 0..0)),
-                0,
+                Default::default(),
             ),
         )
     }}

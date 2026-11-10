@@ -134,6 +134,10 @@ pub fn match_patt<'src>(patt: &Patt<'src>, value: &Value<'src>) -> Option<Env<'s
         (Patt::Lit(p), v) if p == v => Some(vec![]),
         (Patt::Var(x), _) => Some(vec![(x, value.clone())]),
         (Patt::Struct(x, ps), Value::Struct(y, _, args_env, _)) if Some(*x) == *y => {
+            if ps.0.len() != args_env.len() {
+                return None;
+            }
+
             let mut env = vec![];
             for ((p, _), (_, v)) in ps.0.iter().zip(args_env.iter()) {
                 if let Some(new_env) = match_patt(p, v) {
@@ -148,6 +152,9 @@ pub fn match_patt<'src>(patt: &Patt<'src>, value: &Value<'src>) -> Option<Env<'s
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod pattern_tests;
 
 #[cfg(test)]
 mod tests {

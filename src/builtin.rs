@@ -1,6 +1,6 @@
 use chumsky::prelude::*;
 
-use crate::{ast, declare::*, lex};
+use crate::declare::*;
 
 macro_rules! builtin {
     ($name:literal $expr:ident $env:ident [$($param:ident),* $(,)?] => $body:expr) => {
@@ -33,9 +33,9 @@ macro_rules! builtin {
     ($name:literal $expr:ident $env:ident [$($param:ident),* $(,)?] in $body:literal) => {{
         let src = $body;
 
-        let toks = lex::lexer().parse(src).unwrap();
+        let toks = crate::lex::lexer().parse(src).unwrap();
 
-        let ast = ast::expr_parser()
+        let ast = crate::ast::expr_parser()
             .parse_with_state(
                 toks.as_slice()
                     .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
@@ -185,7 +185,17 @@ pub fn env<'src>() -> Env<'src> {
                 }),
             }
         }),
-        builtin!("!=" expr env [a, b] in "case ==(a, b)() { 0 => 1 _ => 0 }" ),
+        builtin!("!=" expr env [a, b] => {
+            match (a, b) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a != b { 1 } else { 0 })),
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a != b { 1 } else { 0 })),
+                (Value::Unit, Value::Unit) => Ok(Value::Int(0)),
+                _ => Err(Error {
+                    msg: format!("Cannot compare {a} and {b} for inequality"),
+                    span: expr.1.clone(),
+                }),
+            }
+        }),
         builtin!(">" expr env [a, b] => {
             match (a, b) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a > b { 1 } else { 0 })),
@@ -234,7 +244,7 @@ mod tests {
     use ariadne::{Label, Report, ReportKind, sources};
 
     use super::*;
-    use crate::interp;
+    use crate::{ast, interp, lex};
 
     fn parse<'src>(src: &'src str, span: Option<Span>) -> Spanned<Expr<'src>> {
         let toks = lex::lexer().parse(src).unwrap();
@@ -343,5 +353,91 @@ mod tests {
             (18..19).into(),
             "Variable `missing_internal` not found",
         );
+    }
+
+    fn eval_src(src: &str) -> Result<Value<'_>, Error> {
+        let toks = lex::lexer().parse(src).unwrap();
+        let expr = ast::expr_parser()
+            .parse_with_state(
+                toks.as_slice()
+                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+                &mut extra::SimpleState(vec![]),
+            )
+            .unwrap();
+
+        interp::eval(&expr, env())
+    }
+
+    #[test]
+    fn test_inequality_supported_values() {
+        for (a, b, unequal) in [
+            ("1", "2", 1),
+            ("2", "1", 1),
+            ("1", "1", 0),
+            ("-2", "-2", 0),
+            ("-2", "2", 1),
+            ("1.0", "2.0", 1),
+            ("1.0", "1.0", 0),
+            ("0.0", "-0.0", 0),
+            ("unit", "unit", 0),
+        ] {
+            for (op, expected) in [("!=", unequal), ("==", 1 - unequal)] {
+                for src in [
+                    format!("{a} {op} {b}"),
+                    format!("{op}({a}, {b})."),
+                    format!("{op}({a}, {b})()"),
+                ] {
+                    assert_eq!(eval_src(&src), Ok(Value::Int(expected)), "{src}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_inequality_rejects_unsupported_values() {
+        for (a, b) in [
+            ("1", "1.0"),
+            ("1.0", "1"),
+            ("unit", "1"),
+            ("1", "unit"),
+            ("unit", "1.0"),
+            ("1.0", "unit"),
+            ("(fn(x) { x })", "(fn(x) { x })"),
+            ("+(1, 2)", "+(1, 2)"),
+            ("(fn(x) { x })", "1"),
+            ("1", "+(1, 2)"),
+        ] {
+            for (op, comparison) in [("!=", "inequality"), ("==", "equality")] {
+                for src in [
+                    format!("{a} {op} {b}"),
+                    format!("{op}({a}, {b})."),
+                    format!("{op}({a}, {b})()"),
+                ] {
+                    let err = eval_src(&src).expect_err(&src);
+                    assert!(err.msg.starts_with("Cannot compare "), "{src}: {err:?}");
+                    assert!(
+                        err.msg.ends_with(&format!(" for {comparison}")),
+                        "{src}: {err:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_inequality_application_remains_explicit() {
+        for src in ["!=(1, 2)", "!=(1, 1.0)"] {
+            assert!(
+                matches!(eval_src(src), Ok(Value::Struct(Some("!="), _, _, _))),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_inequality_does_not_depend_on_shadowed_equality() {
+        let src = "let == = fn(a, b) { 0 } 1 != 1";
+
+        assert_eq!(eval_src(src), Ok(Value::Int(0)));
     }
 }

@@ -1,72 +1,23 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::{Command, Output},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+mod common;
 
-static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
-
-struct SourceFile(PathBuf);
-
-impl SourceFile {
-    fn new(source: impl AsRef<[u8]>) -> Self {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "eel cli errors 🦀-{}-{}-{}.eel",
-            std::process::id(),
-            timestamp.as_nanos(),
-            NEXT_FILE.fetch_add(1, Ordering::Relaxed),
-        ));
-        fs::write(&path, source).unwrap();
-        Self(path)
-    }
-
-    fn run(&self) -> Output {
-        cli().arg(&self.0).output().unwrap()
-    }
-}
-
-impl Drop for SourceFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
-fn cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_eel"))
-}
-
-fn assert_failure(output: &Output, diagnostic: &str) {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert!(stderr.contains(diagnostic), "{stderr}");
-    assert!(!stderr.contains("panicked"), "{stderr}");
-    assert!(output.stdout.is_empty(), "{output:?}");
-}
-
-fn assert_source_diagnostic(output: &Output, path: &Path) {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(&*path.to_string_lossy()), "{stderr}");
-}
+use common::{SourceFile, assert_failure, assert_source_diagnostic, assert_success, cli};
 
 #[test]
-fn missing_file_argument_fails_without_panicking() {
+fn test_missing_file_argument_fails_without_panicking() {
     let output = cli().output().unwrap();
     assert_failure(&output, "Expected file argument");
     assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
 }
 
 #[test]
-fn extra_file_argument_fails_before_evaluation() {
+fn test_extra_file_argument_fails_before_evaluation() {
     let file = SourceFile::new("let _ = print(99). 0");
     let output = cli().arg(&file.0).arg("unexpected").output().unwrap();
     assert_failure(&output, "Expected exactly one file argument");
 }
 
 #[test]
-fn missing_source_file_fails_without_panicking() {
+fn test_missing_source_file_fails_without_panicking() {
     let file = SourceFile::new("0");
     let missing = file.0.with_extension("missing");
     let output = cli().arg(&missing).output().unwrap();
@@ -75,13 +26,13 @@ fn missing_source_file_fails_without_panicking() {
 }
 
 #[test]
-fn directory_source_fails_without_panicking() {
+fn test_directory_source_fails_without_panicking() {
     let output = cli().arg(std::env::temp_dir()).output().unwrap();
     assert_failure(&output, "Failed to read source file");
 }
 
 #[test]
-fn non_utf8_source_fails_without_panicking() {
+fn test_non_utf8_source_fails_without_panicking() {
     let file = SourceFile::new([0xff, 0xfe]);
     let output = file.run();
     assert_failure(&output, "Failed to read source file");
@@ -89,7 +40,7 @@ fn non_utf8_source_fails_without_panicking() {
 }
 
 #[test]
-fn out_of_range_integer_fails_with_source_diagnostic() {
+fn test_out_of_range_integer_fails_with_source_diagnostic() {
     for literal in [
         "9223372036854775808",
         "-9223372036854775809",
@@ -104,7 +55,7 @@ fn out_of_range_integer_fails_with_source_diagnostic() {
 }
 
 #[test]
-fn lex_error_prevents_all_program_execution() {
+fn test_lex_error_prevents_all_program_execution() {
     for source in [
         "let _ = print(123456789). 9223372036854775808",
         "let x = 9223372036854775808 let _ = print(123456789). 0",
@@ -124,7 +75,7 @@ fn lex_error_prevents_all_program_execution() {
 }
 
 #[test]
-fn syntax_error_fails_with_source_diagnostic() {
+fn test_syntax_error_fails_with_source_diagnostic() {
     let file = SourceFile::new("let x =");
     let output = file.run();
     assert_failure(&output, "Parsing failed");
@@ -133,13 +84,13 @@ fn syntax_error_fails_with_source_diagnostic() {
 }
 
 #[test]
-fn empty_source_fails() {
+fn test_empty_source_fails() {
     let output = SourceFile::new("").run();
     assert_failure(&output, "Parsing failed");
 }
 
 #[test]
-fn recovered_ast_is_not_evaluated() {
+fn test_recovered_ast_is_not_evaluated() {
     let file = SourceFile::new("let _ = print(99). { let x = }");
     let output = file.run();
     assert_failure(&output, "Parsing failed");
@@ -147,7 +98,7 @@ fn recovered_ast_is_not_evaluated() {
 }
 
 #[test]
-fn runtime_error_fails_with_source_diagnostic() {
+fn test_runtime_error_fails_with_source_diagnostic() {
     let file = SourceFile::new("missing_variable");
     let output = file.run();
     assert_failure(&output, "Variable `missing_variable` not found");
@@ -155,7 +106,7 @@ fn runtime_error_fails_with_source_diagnostic() {
 }
 
 #[test]
-fn type_error_fails_with_source_diagnostic() {
+fn test_type_error_fails_with_source_diagnostic() {
     let file = SourceFile::new("1 + unit");
     let output = file.run();
     assert_failure(&output, "Cannot add");
@@ -163,7 +114,7 @@ fn type_error_fails_with_source_diagnostic() {
 }
 
 #[test]
-fn division_by_zero_fails_with_source_diagnostic() {
+fn test_division_by_zero_fails_with_source_diagnostic() {
     for source in ["1 / 0", "1.0 / 0.0"] {
         let file = SourceFile::new(source);
         let output = file.run();
@@ -173,31 +124,25 @@ fn division_by_zero_fails_with_source_diagnostic() {
 }
 
 #[test]
-fn success_preserves_returned_output_and_zero_status() {
+fn test_success_preserves_returned_output_and_zero_status() {
     let output = SourceFile::new("42").run();
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "Returned: 42\n");
-    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_success(&output, "Returned: 42\n", "");
 }
 
 #[test]
-fn success_preserves_program_output() {
+fn test_success_preserves_program_output() {
     let output = SourceFile::new("let _ = print(99). 0").run();
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "99\nReturned: 0\n");
-    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_success(&output, "99\nReturned: 0\n", "");
 }
 
 #[test]
-fn stderr_program_output_does_not_count_as_failure() {
+fn test_stderr_program_output_does_not_count_as_failure() {
     let output = SourceFile::new("let _ = eprint(99). 0").run();
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "Returned: 0\n");
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "99\n");
+    assert_success(&output, "Returned: 0\n", "99\n");
 }
 
 #[test]
-fn run_api_exposes_failure_stages() {
+fn test_run_api_exposes_failure_stages() {
     let invalid = SourceFile::new("let x =");
     assert!(matches!(eel::run(&invalid.0), Err(eel::RunError::Parse)));
     assert!(matches!(

@@ -1,77 +1,58 @@
-use chumsky::prelude::*;
+mod common;
 
-use crate::{ast, builtin, declare::Value, lex};
-
-use super::eval;
-
-fn assert_eval<'src>(src: &'src str, expected: Value<'src>) {
-    let toks = lex::lexer().parse(src).unwrap();
-    let expr = ast::expr_parser()
-        .parse_with_state(
-            toks.as_slice()
-                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
-            &mut extra::SimpleState(vec![]),
-        )
-        .unwrap();
-
-    assert_eq!(
-        eval(&expr, builtin::env()).unwrap(),
-        expected,
-        "Source: {src}"
-    );
-}
+use common::assert_returned;
 
 #[test]
 fn test_struct_pattern_rejects_too_few_fields() {
-    assert_eval(
+    assert_returned(
         "let pair = fn(x, y) { unit } case pair(42, 7) { pair(a) => 1 _ => 0 }",
-        Value::Int(0),
+        0,
     );
 }
 
 #[test]
 fn test_struct_pattern_rejects_too_many_fields() {
-    assert_eval(
+    assert_returned(
         "let box = fn(x) { unit } case box(42) { box(a, b) => 1 _ => 0 }",
-        Value::Int(0),
+        0,
     );
 }
 
 #[test]
 fn test_struct_pattern_matches_zero_fields() {
-    assert_eval(
+    assert_returned(
         "let empty = fn() { unit } case empty() { empty() => 1 _ => 0 }",
-        Value::Int(1),
+        1,
     );
 }
 
 #[test]
 fn test_struct_pattern_rejects_empty_pattern_for_nonempty_struct() {
-    assert_eval(
+    assert_returned(
         "let box = fn(x) { unit } case box(42) { box() => 1 _ => 0 }",
-        Value::Int(0),
+        0,
     );
 }
 
 #[test]
 fn test_struct_pattern_rejects_nonempty_pattern_for_empty_struct() {
-    assert_eval(
+    assert_returned(
         "let empty = fn() { unit } case empty() { empty(a) => 1 _ => 0 }",
-        Value::Int(0),
+        0,
     );
 }
 
 #[test]
 fn test_struct_pattern_matches_exact_arity_and_binds_fields() {
-    assert_eval(
+    assert_returned(
         "let pair = fn(x, y) { unit } case pair(42, 7) { pair(a, b) => { a - b } _ => 0 }",
-        Value::Int(35),
+        35,
     );
 }
 
 #[test]
 fn test_struct_pattern_matches_nested_fields_and_binds_values() {
-    assert_eval(
+    assert_returned(
         "
         let box = fn(x) { unit }
         let pair = fn(x, y) { unit }
@@ -80,7 +61,7 @@ fn test_struct_pattern_matches_nested_fields_and_binds_values() {
             _ => 0
         }
         ",
-        Value::Int(49),
+        49,
     );
 }
 
@@ -99,13 +80,13 @@ fn test_struct_pattern_nested_arity_mismatch_preserves_fallback_bindings() {
             "
         );
 
-        assert_eval(&src, Value::Int(99));
+        assert_returned(&src, 99);
     }
 }
 
 #[test]
 fn test_struct_pattern_falls_through_to_matching_arm() {
-    assert_eval(
+    assert_returned(
         "
         let box = fn(x) { unit }
         case box(42) {
@@ -116,6 +97,6 @@ fn test_struct_pattern_falls_through_to_matching_arm() {
             _ => 3
         }
         ",
-        Value::Int(42),
+        42,
     );
 }

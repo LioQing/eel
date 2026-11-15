@@ -187,12 +187,6 @@ pub fn match_patt<'src>(patt: &Patt<'src>, value: &Value<'src>) -> Option<Env<'s
 }
 
 #[cfg(test)]
-mod lexical_capture_tests;
-
-#[cfg(test)]
-mod pattern_tests;
-
-#[cfg(test)]
 mod tests {
     use chumsky::prelude::*;
 
@@ -211,6 +205,75 @@ mod tests {
         };
 
         assert_eq!(value, expected);
+    }
+
+    fn int<'src>(value: i64) -> Spanned<Expr<'src>> {
+        spanned(Expr::Lit(Value::Int(value)))
+    }
+
+    fn var(name: &str) -> Spanned<Expr<'_>> {
+        spanned(Expr::Var(name))
+    }
+
+    fn function<'src>(params: Vec<&'src str>, body: Spanned<Expr<'src>>) -> Spanned<Expr<'src>> {
+        spanned(Expr::Fn(spanned(params), Box::new(body)))
+    }
+
+    fn call<'src>(
+        func: Spanned<Expr<'src>>,
+        args: Vec<Spanned<Expr<'src>>>,
+    ) -> Spanned<Expr<'src>> {
+        spanned(Expr::Call(Box::new(func), spanned(args)))
+    }
+
+    fn binding<'src>(
+        name: &'src str,
+        assign: Spanned<Expr<'src>>,
+        body: Spanned<Expr<'src>>,
+    ) -> Spanned<Expr<'src>> {
+        spanned(Expr::Let(None, name, Box::new(assign), Box::new(body)))
+    }
+
+    fn op<'src>(
+        left: Spanned<Expr<'src>>,
+        name: &'src str,
+        right: Spanned<Expr<'src>>,
+    ) -> Spanned<Expr<'src>> {
+        spanned(Expr::Op(
+            Box::new(left),
+            Box::new(var(name)),
+            Box::new(right),
+        ))
+    }
+
+    fn case<'src>(
+        value: Spanned<Expr<'src>>,
+        arms: Vec<(Spanned<Patt<'src>>, Spanned<Expr<'src>>)>,
+    ) -> Spanned<Expr<'src>> {
+        spanned(Expr::Case(
+            Box::new(value),
+            spanned(
+                arms.into_iter()
+                    .map(|(patt, body)| (patt, Box::new(body)))
+                    .collect(),
+            ),
+        ))
+    }
+
+    fn struct_value<'src>(name: &'src str, fields: Env<'src>) -> Value<'src> {
+        Value::Struct(
+            Some(name),
+            Box::new(spanned(Expr::Lit(Value::Unit))),
+            fields,
+            Default::default(),
+        )
+    }
+
+    fn struct_pattern<'src>(
+        name: &'src str,
+        fields: Vec<Spanned<Patt<'src>>>,
+    ) -> Spanned<Patt<'src>> {
+        spanned(Patt::Struct(name, spanned(fields)))
     }
 
     #[test]
@@ -459,5 +522,430 @@ mod tests {
         ));
 
         assert_eval(expr, env, Value::Int(45));
+    }
+
+    #[test]
+    fn test_returned_closure_retains_parameter() {
+        let make = function(vec!["x"], function(vec![], var("x")));
+        let expr = binding(
+            "make",
+            make,
+            binding(
+                "f",
+                call(call(var("make"), vec![int(42)]), vec![]),
+                call(call(var("f"), vec![]), vec![]),
+            ),
+        );
+        assert_eval(expr, vec![], Value::Int(42));
+    }
+
+    #[test]
+    fn test_block_closure_retains_shadowed_binding() {
+        let expr = binding(
+            "x",
+            int(0),
+            binding(
+                "f",
+                binding("x", int(42), function(vec![], var("x"))),
+                binding("padding", int(99), call(call(var("f"), vec![]), vec![])),
+            ),
+        );
+        assert_eval(expr, vec![], Value::Int(42));
+    }
+
+    #[test]
+    fn test_separate_calls_retain_separate_environments() {
+        let make = function(vec!["x"], function(vec![], var("x")));
+        let expr = binding(
+            "make",
+            make,
+            binding(
+                "first",
+                call(call(var("make"), vec![int(20)]), vec![]),
+                binding(
+                    "second",
+                    call(call(var("make"), vec![int(22)]), vec![]),
+                    op(
+                        call(call(var("first"), vec![]), vec![]),
+                        "+",
+                        call(call(var("second"), vec![]), vec![]),
+                    ),
+                ),
+            ),
+        );
+        assert_eval(expr, builtin::env(), Value::Int(42));
+    }
+
+    #[test]
+    fn test_escaped_struct_retains_parameter() {
+        let make = function(
+            vec!["x"],
+            binding("get", function(vec![], var("x")), call(var("get"), vec![])),
+        );
+        let expr = binding(
+            "make",
+            make,
+            binding(
+                "value",
+                call(call(var("make"), vec![int(42)]), vec![]),
+                call(var("value"), vec![]),
+            ),
+        );
+        assert_eval(expr, vec![], Value::Int(42));
+    }
+
+    #[test]
+    fn test_block_struct_retains_shadowed_binding() {
+        let value = binding(
+            "x",
+            int(42),
+            binding("get", function(vec![], var("x")), call(var("get"), vec![])),
+        );
+        let expr = binding(
+            "x",
+            int(0),
+            binding(
+                "value",
+                value,
+                binding("padding", int(99), call(var("value"), vec![])),
+            ),
+        );
+        assert_eval(expr, vec![], Value::Int(42));
+    }
+
+    #[test]
+    fn test_caller_bindings_do_not_replace_lexical_bindings() {
+        let closure = Value::Closure(
+            Some("f"),
+            vec![],
+            Box::new(var("x")),
+            Rc::new(vec![("x", Value::Int(42))]),
+        );
+        let expr = call(call(var("f"), vec![]), vec![]);
+        assert_eval(
+            expr,
+            vec![("f", closure), ("x", Value::Int(99))],
+            Value::Int(42),
+        );
+    }
+
+    #[test]
+    fn test_parameters_shadow_captured_bindings() {
+        let closure = Value::Closure(
+            Some("make"),
+            vec!["x"],
+            Box::new(function(vec![], var("x"))),
+            Rc::new(vec![("x", Value::Int(99))]),
+        );
+        let expr = binding(
+            "f",
+            call(call(var("make"), vec![int(42)]), vec![]),
+            call(call(var("f"), vec![]), vec![]),
+        );
+        assert_eval(expr, vec![("make", closure)], Value::Int(42));
+    }
+
+    #[test]
+    fn test_returned_operator_retains_lexical_environment() {
+        let expr = binding(
+            "op",
+            binding(
+                "x",
+                int(40),
+                function(
+                    vec!["a", "b"],
+                    op(var("x"), "+", op(var("a"), "+", var("b"))),
+                ),
+            ),
+            op(int(1), "op", int(1)),
+        );
+        assert_eval(expr, builtin::env(), Value::Int(42));
+    }
+
+    #[test]
+    fn test_returned_closure_retains_pattern_bindings() {
+        let value = struct_value("wrap", vec![("x", Value::Int(42))]);
+        let expr = binding(
+            "f",
+            case(
+                spanned(Expr::Lit(value)),
+                vec![(
+                    struct_pattern("wrap", vec![spanned(Patt::Var("x"))]),
+                    function(vec![], var("x")),
+                )],
+            ),
+            call(call(var("f"), vec![]), vec![]),
+        );
+        assert_eval(expr, vec![], Value::Int(42));
+    }
+
+    fn factorial<'src>() -> Spanned<Expr<'src>> {
+        function(
+            vec!["n"],
+            case(
+                var("n"),
+                vec![
+                    (spanned(Patt::Lit(Value::Int(0))), int(1)),
+                    (
+                        spanned(Patt::Var("_")),
+                        op(
+                            var("n"),
+                            "*",
+                            call(call(var("fact"), vec![op(var("n"), "-", int(1))]), vec![]),
+                        ),
+                    ),
+                ],
+            ),
+        )
+    }
+
+    #[test]
+    fn test_recursive_function_retains_escaped_environment() {
+        let sum = function(
+            vec!["n"],
+            case(
+                var("n"),
+                vec![
+                    (spanned(Patt::Lit(Value::Int(0))), var("base")),
+                    (
+                        spanned(Patt::Var("_")),
+                        op(
+                            var("n"),
+                            "+",
+                            call(call(var("sum"), vec![op(var("n"), "-", int(1))]), vec![]),
+                        ),
+                    ),
+                ],
+            ),
+        );
+        let make = function(vec!["base"], binding("sum", sum, var("sum")));
+        let expr = binding(
+            "make",
+            make,
+            binding(
+                "sum",
+                call(call(var("make"), vec![int(27)]), vec![]),
+                call(call(var("sum"), vec![int(5)]), vec![]),
+            ),
+        );
+        assert_eval(expr, builtin::env(), Value::Int(42));
+    }
+
+    #[test]
+    fn test_recursive_alias_keeps_original_recursive_binding() {
+        let expr = binding(
+            "fact",
+            factorial(),
+            binding(
+                "alias",
+                var("fact"),
+                binding(
+                    "fact",
+                    function(vec!["n"], int(0)),
+                    call(call(var("alias"), vec![int(5)]), vec![]),
+                ),
+            ),
+        );
+        assert_eval(expr, builtin::env(), Value::Int(120));
+    }
+
+    #[test]
+    fn test_escaped_struct_retains_recursive_binding() {
+        let expr = binding(
+            "value",
+            binding("fact", factorial(), call(var("fact"), vec![int(5)])),
+            call(var("value"), vec![]),
+        );
+        assert_eval(expr, builtin::env(), Value::Int(120));
+    }
+
+    #[test]
+    fn test_parameters_shadow_recursive_binding() {
+        let expr = binding(
+            "f",
+            function(vec!["f"], var("f")),
+            call(call(var("f"), vec![int(42)]), vec![]),
+        );
+        assert_eval(expr, vec![], Value::Int(42));
+    }
+
+    #[test]
+    fn test_builtin_alias_evaluates_arguments_in_caller_environment() {
+        let expr = binding(
+            "add",
+            var("+"),
+            binding(
+                "x",
+                int(42),
+                call(call(var("add"), vec![var("x"), int(0)]), vec![]),
+            ),
+        );
+        assert_eval(expr, builtin::env(), Value::Int(42));
+    }
+
+    #[test]
+    fn test_caller_cannot_supply_missing_lexical_binding() {
+        let closure = Value::Closure(
+            Some("f"),
+            vec![],
+            Box::new((Expr::Var("x"), (12..13).into())),
+            Default::default(),
+        );
+        let expr = call(call(var("f"), vec![]), vec![]);
+        assert_eq!(
+            eval(&expr, vec![("f", closure), ("x", Value::Int(42))]),
+            Err(Error {
+                msg: "Variable `x` not found".into(),
+                span: (12..13).into()
+            })
+        );
+    }
+
+    #[test]
+    fn test_struct_pattern_requires_exact_field_arity() {
+        for (name, fields, patterns) in [
+            (
+                "pair",
+                vec![("x", Value::Int(42)), ("y", Value::Int(7))],
+                vec![vec![spanned(Patt::Var("a"))]],
+            ),
+            (
+                "box",
+                vec![("x", Value::Int(42))],
+                vec![
+                    vec![],
+                    vec![spanned(Patt::Var("a")), spanned(Patt::Var("b"))],
+                ],
+            ),
+            ("empty", vec![], vec![vec![spanned(Patt::Var("a"))]]),
+        ] {
+            let value = struct_value(name, fields);
+            for fields in patterns {
+                let pattern = struct_pattern(name, fields);
+                assert_eq!(match_patt(&pattern.0, &value), None);
+                let expr = case(
+                    spanned(Expr::Lit(value.clone())),
+                    vec![(pattern, int(1)), (spanned(Patt::Var("_")), int(0))],
+                );
+                assert_eval(expr, vec![], Value::Int(0));
+            }
+        }
+    }
+
+    #[test]
+    fn test_struct_pattern_matches_zero_fields() {
+        let value = struct_value("empty", vec![]);
+        let pattern = struct_pattern("empty", vec![]);
+        assert_eq!(match_patt(&pattern.0, &value), Some(vec![]));
+        assert_eval(
+            case(spanned(Expr::Lit(value)), vec![(pattern, int(1))]),
+            vec![],
+            Value::Int(1),
+        );
+    }
+
+    #[test]
+    fn test_struct_pattern_matches_exact_arity_and_binds_fields() {
+        let value = struct_value("pair", vec![("x", Value::Int(42)), ("y", Value::Int(7))]);
+        let pattern = struct_pattern(
+            "pair",
+            vec![spanned(Patt::Var("a")), spanned(Patt::Var("b"))],
+        );
+        assert_eq!(
+            match_patt(&pattern.0, &value),
+            Some(vec![("a", Value::Int(42)), ("b", Value::Int(7))])
+        );
+        assert_eval(
+            case(
+                spanned(Expr::Lit(value)),
+                vec![(pattern, op(var("a"), "-", var("b")))],
+            ),
+            builtin::env(),
+            Value::Int(35),
+        );
+    }
+
+    #[test]
+    fn test_struct_pattern_matches_nested_fields_and_binds_values() {
+        let value = struct_value(
+            "pair",
+            vec![
+                ("x", Value::Int(7)),
+                ("y", struct_value("box", vec![("x", Value::Int(42))])),
+            ],
+        );
+        let pattern = struct_pattern(
+            "pair",
+            vec![
+                spanned(Patt::Var("a")),
+                struct_pattern("box", vec![spanned(Patt::Var("b"))]),
+            ],
+        );
+        assert_eq!(
+            match_patt(&pattern.0, &value),
+            Some(vec![("a", Value::Int(7)), ("b", Value::Int(42))])
+        );
+        assert_eval(
+            case(
+                spanned(Expr::Lit(value)),
+                vec![(pattern, op(var("a"), "+", var("b")))],
+            ),
+            builtin::env(),
+            Value::Int(49),
+        );
+    }
+
+    #[test]
+    fn test_struct_pattern_nested_arity_mismatch_preserves_fallback_bindings() {
+        let value = struct_value(
+            "outer",
+            vec![
+                ("tag", Value::Int(7)),
+                ("item", struct_value("inner", vec![("x", Value::Int(42))])),
+            ],
+        );
+        for fields in [
+            vec![],
+            vec![spanned(Patt::Var("a")), spanned(Patt::Var("b"))],
+        ] {
+            let pattern = struct_pattern(
+                "outer",
+                vec![spanned(Patt::Var("tag")), struct_pattern("inner", fields)],
+            );
+            assert_eq!(match_patt(&pattern.0, &value), None);
+            let expr = case(
+                spanned(Expr::Lit(value.clone())),
+                vec![(pattern, int(1)), (spanned(Patt::Var("_")), var("tag"))],
+            );
+            assert_eval(expr, vec![("tag", Value::Int(99))], Value::Int(99));
+        }
+    }
+
+    #[test]
+    fn test_struct_pattern_falls_through_to_matching_arm() {
+        let value = struct_value("box", vec![("x", Value::Int(42))]);
+        let expr = case(
+            spanned(Expr::Lit(value)),
+            vec![
+                (struct_pattern("box", vec![]), int(0)),
+                (
+                    struct_pattern(
+                        "box",
+                        vec![spanned(Patt::Var("a")), spanned(Patt::Var("b"))],
+                    ),
+                    int(1),
+                ),
+                (
+                    struct_pattern("box", vec![spanned(Patt::Lit(Value::Int(41)))]),
+                    int(2),
+                ),
+                (
+                    struct_pattern("box", vec![spanned(Patt::Var("a"))]),
+                    var("a"),
+                ),
+                (spanned(Patt::Var("_")), int(3)),
+            ],
+        );
+        assert_eval(expr, vec![], Value::Int(42));
     }
 }

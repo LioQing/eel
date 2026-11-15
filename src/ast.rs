@@ -302,32 +302,54 @@ mod tests {
 
     use super::*;
 
-    use crate::{builtin, interp, lex};
+    use crate::lex;
 
     fn spanned<T: Clone>(value: T) -> Spanned<T> {
         Spanned::new(value, 0..0)
     }
 
-    fn parse_source(src: &str) -> Spanned<Expr<'_>> {
-        let toks = lex::lexer().parse(src).unwrap();
-        expr_parser()
-            .parse_with_state(
-                toks.as_slice()
-                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
-                &mut extra::SimpleState(vec![]),
-            )
-            .into_result()
-            .unwrap_or_else(|errs| panic!("source: {src}\nparse errors: {errs:?}"))
+    fn int<'src>(value: i64) -> Spanned<Expr<'src>> {
+        spanned(Expr::Lit(Value::Int(value)))
     }
 
-    fn assert_source_eval(src: &str, expected: i64) {
-        let expr = parse_source(src);
-        let result = interp::eval(&expr, builtin::env());
-        assert_eq!(result, Ok(Value::Int(expected)), "source: {src}");
+    fn var(name: &str) -> Spanned<Expr<'_>> {
+        spanned(Expr::Var(name))
+    }
+
+    fn op<'src>(
+        left: Spanned<Expr<'src>>,
+        name: &'src str,
+        right: Spanned<Expr<'src>>,
+    ) -> Spanned<Expr<'src>> {
+        spanned(Expr::Op(
+            Box::new(left),
+            Box::new(var(name)),
+            Box::new(right),
+        ))
+    }
+
+    fn binding<'src>(
+        spec: Option<(OpAssoc, i64)>,
+        name: &'src str,
+        assign: Spanned<Expr<'src>>,
+        body: Spanned<Expr<'src>>,
+    ) -> Spanned<Expr<'src>> {
+        spanned(Expr::Let(spec, name, Box::new(assign), Box::new(body)))
+    }
+
+    fn function<'src>(params: Vec<&'src str>, body: Spanned<Expr<'src>>) -> Spanned<Expr<'src>> {
+        spanned(Expr::Fn(spanned(params), Box::new(body)))
+    }
+
+    fn call<'src>(
+        func: Spanned<Expr<'src>>,
+        args: Vec<Spanned<Expr<'src>>>,
+    ) -> Spanned<Expr<'src>> {
+        spanned(Expr::Call(Box::new(func), spanned(args)))
     }
 
     macro_rules! assert_ast {
-        ($src:literal, $expected:expr $(,)?) => {
+        ($src:expr, $expected:expr $(,)?) => {
             let src = $src;
 
             let toks = lex::lexer().parse(src).unwrap();
@@ -819,269 +841,692 @@ mod tests {
     #[test]
     fn test_builtin_arithmetic_precedence_and_associativity() {
         for (src, expected) in [
-            ("2 * 3 + 4", 10),
-            ("2 + 3 * 4", 14),
-            ("20 - 3 - 2", 15),
-            ("24 / 3 / 2", 4),
-            ("20 / 2 * 3", 30),
-            ("20 % 6 * 2", 4),
-            ("20 - 3 + 2", 19),
-            ("2 + 3 * 4 - 6 / 2", 11),
+            ("2 * 3 + 4", op(op(int(2), "*", int(3)), "+", int(4))),
+            ("2 + 3 * 4", op(int(2), "+", op(int(3), "*", int(4)))),
+            ("20 - 3 - 2", op(op(int(20), "-", int(3)), "-", int(2))),
+            ("24 / 3 / 2", op(op(int(24), "/", int(3)), "/", int(2))),
+            ("20 / 2 * 3", op(op(int(20), "/", int(2)), "*", int(3))),
+            ("20 % 6 * 2", op(op(int(20), "%", int(6)), "*", int(2))),
+            ("20 - 3 + 2", op(op(int(20), "-", int(3)), "+", int(2))),
+            (
+                "2 + 3 * 4 - 6 / 2",
+                op(
+                    op(int(2), "+", op(int(3), "*", int(4))),
+                    "-",
+                    op(int(6), "/", int(2)),
+                ),
+            ),
         ] {
-            assert_source_eval(src, expected);
+            assert_ast!(src, expected);
         }
     }
 
     #[test]
     fn test_builtin_comparison_precedence_and_associativity() {
         for (src, expected) in [
-            ("2 * 3 + 4 == 10", 1),
-            ("10 == 2 + 3 * 4", 0),
-            ("1 + 2 < 4 * 2", 1),
-            ("2 * 3 >= 4 + 2", 1),
-            ("1 == 2 < 3", 1),
-            ("1 < 2 == 3 < 4", 1),
-            ("4 < 3 < 2", 1),
-            ("2 == 2 == 1", 1),
+            (
+                "2 * 3 + 4 == 10",
+                op(op(op(int(2), "*", int(3)), "+", int(4)), "==", int(10)),
+            ),
+            (
+                "10 == 2 + 3 * 4",
+                op(int(10), "==", op(int(2), "+", op(int(3), "*", int(4)))),
+            ),
+            (
+                "1 + 2 < 4 * 2",
+                op(op(int(1), "+", int(2)), "<", op(int(4), "*", int(2))),
+            ),
+            (
+                "2 * 3 >= 4 + 2",
+                op(op(int(2), "*", int(3)), ">=", op(int(4), "+", int(2))),
+            ),
+            ("1 == 2 < 3", op(int(1), "==", op(int(2), "<", int(3)))),
+            (
+                "1 < 2 == 3 < 4",
+                op(op(int(1), "<", int(2)), "==", op(int(3), "<", int(4))),
+            ),
+            ("4 < 3 < 2", op(op(int(4), "<", int(3)), "<", int(2))),
+            ("2 == 2 == 1", op(op(int(2), "==", int(2)), "==", int(1))),
         ] {
-            assert_source_eval(src, expected);
+            assert_ast!(src, expected);
         }
-        // Check inequality grouping independently of its runtime implementation.
-        assert_eq!(
-            parse_source("1 + 2 != 3 < 4").0.to_string(),
-            "((1 + 2) != (3 < 4))",
+        assert_ast!(
+            "1 + 2 != 3 < 4",
+            op(op(int(1), "+", int(2)), "!=", op(int(3), "<", int(4))),
         );
     }
 
     #[test]
     fn test_inequality_mixed_precedence_and_associativity() {
         for (src, expected) in [
-            ("2 * 3 + 4 != 10", 0),
-            ("10 != 2 + 3 * 4", 1),
-            ("1 + 2 != 4 * 2", 1),
-            ("1 != 2 < 3", 0),
-            ("1 < 2 != 3 < 4", 0),
-            ("4 < 3 != 2 + 1", 1),
-            ("2 != 2 != 0", 0),
-            ("2 == 2 != 0", 1),
-            ("1 != 2 == 0", 0),
-            ("1.0 + 2.0 != 3.0 * 1.0", 0),
-            ("2 * (3 + 4) != 10", 1),
-            ("!=(2 * 3 + 4, 10).", 0),
+            (
+                "2 * 3 + 4 != 10",
+                op(op(op(int(2), "*", int(3)), "+", int(4)), "!=", int(10)),
+            ),
+            (
+                "10 != 2 + 3 * 4",
+                op(int(10), "!=", op(int(2), "+", op(int(3), "*", int(4)))),
+            ),
+            (
+                "1 + 2 != 4 * 2",
+                op(op(int(1), "+", int(2)), "!=", op(int(4), "*", int(2))),
+            ),
+            ("1 != 2 < 3", op(int(1), "!=", op(int(2), "<", int(3)))),
+            (
+                "1 < 2 != 3 < 4",
+                op(op(int(1), "<", int(2)), "!=", op(int(3), "<", int(4))),
+            ),
+            (
+                "4 < 3 != 2 + 1",
+                op(op(int(4), "<", int(3)), "!=", op(int(2), "+", int(1))),
+            ),
+            ("2 != 2 != 0", op(op(int(2), "!=", int(2)), "!=", int(0))),
+            ("2 == 2 != 0", op(op(int(2), "==", int(2)), "!=", int(0))),
+            ("1 != 2 == 0", op(op(int(1), "!=", int(2)), "==", int(0))),
+            (
+                "2 * (3 + 4) != 10",
+                op(op(int(2), "*", op(int(3), "+", int(4))), "!=", int(10)),
+            ),
+            (
+                "!=(2 * 3 + 4, 10).",
+                call(
+                    call(
+                        var("!="),
+                        vec![op(op(int(2), "*", int(3)), "+", int(4)), int(10)],
+                    ),
+                    vec![],
+                ),
+            ),
         ] {
-            assert_source_eval(src, expected);
+            assert_ast!(src, expected);
         }
+        let float = |value| spanned(Expr::Lit(Value::Float(value)));
+        assert_ast!(
+            "1.0 + 2.0 != 3.0 * 1.0",
+            op(
+                op(float(1.0), "+", float(2.0)),
+                "!=",
+                op(float(3.0), "*", float(1.0))
+            )
+        );
     }
 
     #[test]
     fn test_declared_left_and_right_associativity() {
-        assert_source_eval("let opl 1 sub = fn(a, b) { a - b } 10 sub 3 sub 2", 5);
-        assert_source_eval("let opr 1 sub = fn(a, b) { a - b } 10 sub 3 sub 2", 9);
-        assert_source_eval(
-            "let opr 9223372036854775807 sub = fn(a, b) { a - b } 10 sub 3 sub 2",
-            9,
-        );
-        assert_source_eval(
-            "let opl -9223372036854775808 sub = fn(a, b) { a - b } 10 sub 3 sub 2",
-            5,
-        );
+        for (keyword, assoc, prec) in [
+            ("opl", OpAssoc::Left, 1),
+            ("opr", OpAssoc::Right, 1),
+            ("opr", OpAssoc::Right, i64::MAX),
+            ("opl", OpAssoc::Left, i64::MIN),
+        ] {
+            let src = format!("let {keyword} {prec} sub = fn(a, b) {{ a - b }} 10 sub 3 sub 2");
+            let body = match assoc {
+                OpAssoc::Left => op(op(int(10), "sub", int(3)), "sub", int(2)),
+                OpAssoc::Right => op(int(10), "sub", op(int(3), "sub", int(2))),
+            };
+            assert_ast!(
+                src.as_str(),
+                binding(
+                    Some((assoc, prec)),
+                    "sub",
+                    function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                    body
+                )
+            );
+        }
     }
 
     #[test]
     fn test_custom_precedence_in_both_operator_orders() {
-        for (chain, expected) in [
-            ("2 mul 3 add 4", 10),
-            ("2 add 3 mul 4", 14),
-            ("2 mul 3 add 4 mul 5 add 6", 32),
+        for (add_prec, mul_prec, src, expected) in [
+            (
+                5,
+                6,
+                "let opl 5 add = fn(a, b) { a + b } let opl 6 mul = fn(a, b) { a * b } 2 mul 3 add 4",
+                op(op(int(2), "mul", int(3)), "add", int(4)),
+            ),
+            (
+                5,
+                6,
+                "let opl 5 add = fn(a, b) { a + b } let opl 6 mul = fn(a, b) { a * b } 2 add 3 mul 4",
+                op(int(2), "add", op(int(3), "mul", int(4))),
+            ),
+            (
+                5,
+                6,
+                "let opl 5 add = fn(a, b) { a + b } let opl 6 mul = fn(a, b) { a * b } 2 mul 3 add 4 mul 5 add 6",
+                op(
+                    op(op(int(2), "mul", int(3)), "add", op(int(4), "mul", int(5))),
+                    "add",
+                    int(6),
+                ),
+            ),
+            (
+                6,
+                5,
+                "let opl 6 add = fn(a, b) { a + b } let opl 5 mul = fn(a, b) { a * b } 2 mul 3 add 4",
+                op(int(2), "mul", op(int(3), "add", int(4))),
+            ),
+            (
+                6,
+                5,
+                "let opl 6 add = fn(a, b) { a + b } let opl 5 mul = fn(a, b) { a * b } 2 add 3 mul 4",
+                op(op(int(2), "add", int(3)), "mul", int(4)),
+            ),
         ] {
-            assert_source_eval(
-                &format!(
-                    "let opl 5 add = fn(a, b) {{ a + b }}
-                     let opl 6 mul = fn(a, b) {{ a * b }} {chain}"
-                ),
-                expected,
-            );
-        }
-        for (chain, expected) in [("2 mul 3 add 4", 14), ("2 add 3 mul 4", 20)] {
-            assert_source_eval(
-                &format!(
-                    "let opl 6 add = fn(a, b) {{ a + b }}
-                     let opl 5 mul = fn(a, b) {{ a * b }} {chain}"
-                ),
-                expected,
+            assert_ast!(
+                src,
+                binding(
+                    Some((OpAssoc::Left, add_prec)),
+                    "add",
+                    function(vec!["a", "b"], op(var("a"), "+", var("b"))),
+                    binding(
+                        Some((OpAssoc::Left, mul_prec)),
+                        "mul",
+                        function(vec!["a", "b"], op(var("a"), "*", var("b"))),
+                        expected
+                    )
+                )
             );
         }
     }
 
     #[test]
     fn test_custom_and_builtin_precedence_in_both_operator_orders() {
-        for (src, expected) in [
-            ("let opl 0 add = fn(a, b) { a + b } 2 * 3 add 4", 10),
-            ("let opl 0 add = fn(a, b) { a + b } 2 add 3 * 4", 14),
-            ("let opl 5 add = fn(a, b) { a + b } 2 * 3 add 4", 14),
-            ("let opl 5 add = fn(a, b) { a + b } 2 add 3 * 4", 20),
+        for (prec, src, expected) in [
+            (
+                0,
+                "let opl 0 add = fn(a, b) { a + b } 2 * 3 add 4",
+                op(op(int(2), "*", int(3)), "add", int(4)),
+            ),
+            (
+                0,
+                "let opl 0 add = fn(a, b) { a + b } 2 add 3 * 4",
+                op(int(2), "add", op(int(3), "*", int(4))),
+            ),
+            (
+                5,
+                "let opl 5 add = fn(a, b) { a + b } 2 * 3 add 4",
+                op(int(2), "*", op(int(3), "add", int(4))),
+            ),
+            (
+                5,
+                "let opl 5 add = fn(a, b) { a + b } 2 add 3 * 4",
+                op(op(int(2), "add", int(3)), "*", int(4)),
+            ),
         ] {
-            assert_source_eval(src, expected);
+            assert_ast!(
+                src,
+                binding(
+                    Some((OpAssoc::Left, prec)),
+                    "add",
+                    function(vec!["a", "b"], op(var("a"), "+", var("b"))),
+                    expected
+                )
+            );
         }
     }
 
     #[test]
     fn test_equal_precedence_uses_following_operator_associativity() {
-        for (sub_assoc, add_assoc, expected) in [
-            ("opl", "opl", 9),
-            ("opr", "opr", 5),
-            ("opl", "opr", 5),
-            ("opr", "opl", 9),
-        ] {
-            assert_source_eval(
-                &format!(
-                    "let {sub_assoc} 5 sub = fn(a, b) {{ a - b }}
-                     let {add_assoc} 5 add = fn(a, b) {{ a + b }} 10 sub 3 add 2"
-                ),
-                expected,
-            );
+        for (sub_keyword, sub_assoc) in [("opl", OpAssoc::Left), ("opr", OpAssoc::Right)] {
+            for (add_keyword, add_assoc) in [("opl", OpAssoc::Left), ("opr", OpAssoc::Right)] {
+                let src = format!(
+                    "let {sub_keyword} 5 sub = fn(a, b) {{ a - b }} let {add_keyword} 5 add = fn(a, b) {{ a + b }} 10 sub 3 add 2"
+                );
+                let body = match add_assoc {
+                    OpAssoc::Left => op(op(int(10), "sub", int(3)), "add", int(2)),
+                    OpAssoc::Right => op(int(10), "sub", op(int(3), "add", int(2))),
+                };
+                assert_ast!(
+                    src.as_str(),
+                    binding(
+                        Some((sub_assoc, 5)),
+                        "sub",
+                        function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                        binding(
+                            Some((add_assoc, 5)),
+                            "add",
+                            function(vec!["a", "b"], op(var("a"), "+", var("b"))),
+                            body
+                        )
+                    )
+                );
+            }
         }
     }
 
     #[test]
     fn test_parentheses_and_nested_grouping_override_fixity() {
         for (src, expected) in [
-            ("2 * (3 + 4)", 14),
-            ("(2 * 3) + 4", 10),
-            ("100 - (20 - (5 - 2))", 83),
-            ("((20 - 3) - 2)", 15),
-            ("20 - (3 - 2)", 19),
-            ("2 * ((3 + 4) * (5 - (3 - 1))) + 1", 43),
-            ("let opl 1 sub = fn(a, b) { a - b } 10 sub (3 sub 2)", 9),
-            ("let opr 1 sub = fn(a, b) { a - b } { (10 sub 3) sub 2 }", 5),
+            ("2 * (3 + 4)", op(int(2), "*", op(int(3), "+", int(4)))),
+            ("(2 * 3) + 4", op(op(int(2), "*", int(3)), "+", int(4))),
             (
-                "let opl 5 add = fn(a, b) { a + b }
-                 let opl 6 mul = fn(a, b) { a * b } { (2 add 3) mul 4 }",
-                20,
+                "100 - (20 - (5 - 2))",
+                op(int(100), "-", op(int(20), "-", op(int(5), "-", int(2)))),
+            ),
+            ("((20 - 3) - 2)", op(op(int(20), "-", int(3)), "-", int(2))),
+            ("20 - (3 - 2)", op(int(20), "-", op(int(3), "-", int(2)))),
+            (
+                "2 * ((3 + 4) * (5 - (3 - 1))) + 1",
+                op(
+                    op(
+                        int(2),
+                        "*",
+                        op(
+                            op(int(3), "+", int(4)),
+                            "*",
+                            op(int(5), "-", op(int(3), "-", int(1))),
+                        ),
+                    ),
+                    "+",
+                    int(1),
+                ),
             ),
         ] {
-            assert_source_eval(src, expected);
+            assert_ast!(src, expected);
         }
+        assert_ast!(
+            "let opl 1 sub = fn(a, b) { a - b } 10 sub (3 sub 2)",
+            binding(
+                Some((OpAssoc::Left, 1)),
+                "sub",
+                function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                op(int(10), "sub", op(int(3), "sub", int(2)))
+            )
+        );
+        assert_ast!(
+            "let opr 1 sub = fn(a, b) { a - b } { (10 sub 3) sub 2 }",
+            binding(
+                Some((OpAssoc::Right, 1)),
+                "sub",
+                function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                op(op(int(10), "sub", int(3)), "sub", int(2))
+            )
+        );
+        assert_ast!(
+            "let opl 5 add = fn(a, b) { a + b } let opl 6 mul = fn(a, b) { a * b } { (2 add 3) mul 4 }",
+            binding(
+                Some((OpAssoc::Left, 5)),
+                "add",
+                function(vec!["a", "b"], op(var("a"), "+", var("b"))),
+                binding(
+                    Some((OpAssoc::Left, 6)),
+                    "mul",
+                    function(vec!["a", "b"], op(var("a"), "*", var("b"))),
+                    op(op(int(2), "add", int(3)), "mul", int(4))
+                )
+            )
+        );
     }
 
     #[test]
     fn test_calls_bind_more_tightly_than_operators() {
-        assert_source_eval("let id = fn(x) { x } 2 * id(3). + id(4).", 10);
-        assert_source_eval("let id = fn(x) { x } id(2 * 3 + 4).", 10);
+        assert_ast!(
+            "let id = fn(x) { x } 2 * id(3). + id(4).",
+            binding(
+                None,
+                "id",
+                function(vec!["x"], var("x")),
+                op(
+                    op(int(2), "*", call(call(var("id"), vec![int(3)]), vec![])),
+                    "+",
+                    call(call(var("id"), vec![int(4)]), vec![])
+                )
+            )
+        );
+        assert_ast!(
+            "let id = fn(x) { x } id(2 * 3 + 4).",
+            binding(
+                None,
+                "id",
+                function(vec!["x"], var("x")),
+                call(
+                    call(var("id"), vec![op(op(int(2), "*", int(3)), "+", int(4))]),
+                    vec![]
+                )
+            )
+        );
     }
 
     #[test]
     fn test_nested_declaration_does_not_leak_into_outer_chain() {
-        assert_source_eval(
+        assert_ast!(
             "let opl 1 sub = fn(a, b) { a - b }
              { let opr 1 sub = fn(a, b) { a - b } 10 sub 3 sub 2 } sub 3 sub 2",
-            4,
+            binding(
+                Some((OpAssoc::Left, 1)),
+                "sub",
+                function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                op(
+                    op(
+                        binding(
+                            Some((OpAssoc::Right, 1)),
+                            "sub",
+                            function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                            op(int(10), "sub", op(int(3), "sub", int(2)))
+                        ),
+                        "sub",
+                        int(3)
+                    ),
+                    "sub",
+                    int(2)
+                )
+            ),
         );
-        assert_source_eval(
+        assert_ast!(
             "let opl 0 add = fn(a, b) { a + b }
              let nested = { let opl 5 add = fn(a, b) { a + b } 2 add 3 * 4 }
              nested + (2 add 3 * 4)",
-            34,
+            binding(
+                Some((OpAssoc::Left, 0)),
+                "add",
+                function(vec!["a", "b"], op(var("a"), "+", var("b"))),
+                binding(
+                    None,
+                    "nested",
+                    binding(
+                        Some((OpAssoc::Left, 5)),
+                        "add",
+                        function(vec!["a", "b"], op(var("a"), "+", var("b"))),
+                        op(op(int(2), "add", int(3)), "*", int(4))
+                    ),
+                    op(
+                        var("nested"),
+                        "+",
+                        op(int(2), "add", op(int(3), "*", int(4)))
+                    )
+                )
+            ),
         );
     }
 
     #[test]
     fn test_nested_declaration_does_not_leak_into_siblings() {
-        assert_source_eval(
+        assert_ast!(
             "let opl 1 sub = fn(a, b) { a - b }
              let pair = fn(a, b) { a * 100 + b }
              pair({ let opr 1 sub = fn(a, b) { a - b } 10 sub 3 sub 2 },
                   10 sub 3 sub 2).",
-            905,
+            binding(
+                Some((OpAssoc::Left, 1)),
+                "sub",
+                function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                binding(
+                    None,
+                    "pair",
+                    function(
+                        vec!["a", "b"],
+                        op(op(var("a"), "*", int(100)), "+", var("b"))
+                    ),
+                    call(
+                        call(
+                            var("pair"),
+                            vec![
+                                binding(
+                                    Some((OpAssoc::Right, 1)),
+                                    "sub",
+                                    function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                                    op(int(10), "sub", op(int(3), "sub", int(2)))
+                                ),
+                                op(op(int(10), "sub", int(3)), "sub", int(2))
+                            ]
+                        ),
+                        vec![]
+                    )
+                )
+            ),
         );
-        assert_source_eval(
+        assert_ast!(
             "let opl 1 sub = fn(a, b) { a - b }
              case 1 {
                  0 => { let opr 1 sub = fn(a, b) { a - b } 10 sub 3 sub 2 }
                  _ => { 10 sub 3 sub 2 }
              }",
-            5,
+            binding(
+                Some((OpAssoc::Left, 1)),
+                "sub",
+                function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                spanned(Expr::Case(
+                    Box::new(int(1)),
+                    spanned(vec![
+                        (
+                            spanned(Patt::Lit(Value::Int(0))),
+                            Box::new(binding(
+                                Some((OpAssoc::Right, 1)),
+                                "sub",
+                                function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                                op(int(10), "sub", op(int(3), "sub", int(2)))
+                            ))
+                        ),
+                        (
+                            spanned(Patt::Var("_")),
+                            Box::new(op(op(int(10), "sub", int(3)), "sub", int(2)))
+                        )
+                    ])
+                ))
+            ),
         );
     }
 
     #[test]
     fn test_function_fixity_is_lexical_not_call_site_dependent() {
-        assert_source_eval(
+        assert_ast!(
             "let opl 1 sub = fn(a, b) { a - b }
              let f = fn() { 10 sub 3 sub 2 }
              let opr 1 sub = fn(a, b) { a - b }
              f().",
-            5,
+            binding(
+                Some((OpAssoc::Left, 1)),
+                "sub",
+                function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                binding(
+                    None,
+                    "f",
+                    function(vec![], op(op(int(10), "sub", int(3)), "sub", int(2))),
+                    binding(
+                        Some((OpAssoc::Right, 1)),
+                        "sub",
+                        function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                        call(call(var("f"), vec![]), vec![])
+                    )
+                )
+            ),
         );
-        assert_source_eval(
+        assert_ast!(
             "let opl 1 sub = fn(a, b) { a - b }
              let f = fn() { let opr 1 sub = fn(a, b) { a - b } 10 sub 3 sub 2 }
              f(). * 100 + (10 sub 3 sub 2)",
-            905,
+            binding(
+                Some((OpAssoc::Left, 1)),
+                "sub",
+                function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                binding(
+                    None,
+                    "f",
+                    function(
+                        vec![],
+                        binding(
+                            Some((OpAssoc::Right, 1)),
+                            "sub",
+                            function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                            op(int(10), "sub", op(int(3), "sub", int(2)))
+                        )
+                    ),
+                    op(
+                        op(call(call(var("f"), vec![]), vec![]), "*", int(100)),
+                        "+",
+                        op(op(int(10), "sub", int(3)), "sub", int(2))
+                    )
+                )
+            ),
         );
     }
 
     #[test]
     fn test_plain_bindings_shadow_operator_fixity() {
-        assert_source_eval("let sub = fn(a, b) { a - b } 10 sub 3 sub 2", 5);
-        assert_source_eval(
+        let subtract = function(vec!["a", "b"], op(var("a"), "-", var("b")));
+        let chain = op(op(int(10), "sub", int(3)), "sub", int(2));
+        assert_ast!(
+            "let sub = fn(a, b) { a - b } 10 sub 3 sub 2",
+            binding(None, "sub", subtract.clone(), chain.clone())
+        );
+        assert_ast!(
             "let opr 5 sub = fn(a, b) { a - b }
              let sub = fn(a, b) { a - b } 10 sub 3 sub 2",
-            5,
+            binding(
+                Some((OpAssoc::Right, 5)),
+                "sub",
+                subtract.clone(),
+                binding(None, "sub", subtract.clone(), chain.clone())
+            ),
         );
-        assert_source_eval(
+        assert_ast!(
             "let opr 5 sub = fn(a, b) { a - b }
              let f = fn(sub) { 10 sub 3 sub 2 }
              f(fn(a, b) { a - b }).",
-            5,
+            binding(
+                Some((OpAssoc::Right, 5)),
+                "sub",
+                subtract.clone(),
+                binding(
+                    None,
+                    "f",
+                    function(vec!["sub"], chain.clone()),
+                    call(call(var("f"), vec![subtract.clone()]), vec![])
+                )
+            ),
         );
-        assert_source_eval(
+        assert_ast!(
             "let opr 5 sub = fn(a, b) { a - b }
              let ordinary = fn(a, b) { a - b }
              case ordinary { sub => { 10 sub 3 sub 2 } }",
-            5,
+            binding(
+                Some((OpAssoc::Right, 5)),
+                "sub",
+                subtract.clone(),
+                binding(
+                    None,
+                    "ordinary",
+                    subtract.clone(),
+                    spanned(Expr::Case(
+                        Box::new(var("ordinary")),
+                        spanned(vec![(spanned(Patt::Var("sub")), Box::new(chain.clone()))])
+                    ))
+                )
+            ),
         );
-        assert_source_eval(
+        assert_ast!(
             "let opr 5 sub = fn(a, b) { a - b }
              let wrap = fn(value) { unit }
              case wrap(fn(a, b) { a - b }) { wrap(sub) => { 10 sub 3 sub 2 } }",
-            5,
+            binding(
+                Some((OpAssoc::Right, 5)),
+                "sub",
+                subtract.clone(),
+                binding(
+                    None,
+                    "wrap",
+                    function(vec!["value"], spanned(Expr::Lit(Value::Unit))),
+                    spanned(Expr::Case(
+                        Box::new(call(var("wrap"), vec![subtract])),
+                        spanned(vec![(
+                            spanned(Patt::Struct(
+                                "wrap",
+                                spanned(vec![spanned(Patt::Var("sub"))])
+                            )),
+                            Box::new(chain)
+                        )])
+                    ))
+                )
+            ),
         );
     }
 
     #[test]
     fn test_initializers_use_previous_binding_fixity() {
-        assert_source_eval(
+        assert_ast!(
             "let opr 1 sub = fn(a, b) { a - b }
              let sub = { 10 sub 3 sub 2 } sub",
-            9,
+            binding(
+                Some((OpAssoc::Right, 1)),
+                "sub",
+                function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                binding(
+                    None,
+                    "sub",
+                    op(int(10), "sub", op(int(3), "sub", int(2))),
+                    var("sub")
+                )
+            ),
         );
-        assert_source_eval(
+        assert_ast!(
             "let opl 1 sub = fn(a, b) { a - b }
              let opr 1 sub = { 10 sub 3 sub 2 } sub",
-            5,
+            binding(
+                Some((OpAssoc::Left, 1)),
+                "sub",
+                function(vec!["a", "b"], op(var("a"), "-", var("b"))),
+                binding(
+                    Some((OpAssoc::Right, 1)),
+                    "sub",
+                    op(op(int(10), "sub", int(3)), "sub", int(2)),
+                    var("sub")
+                )
+            ),
         );
     }
 
     #[test]
     fn test_recursive_function_body_uses_its_own_declared_fixity() {
-        for (assoc, expected) in [("opl", "((10 sub 3) sub 2)"), ("opr", "(10 sub (3 sub 2))")] {
-            let src = format!("let {assoc} 1 sub = fn(a, b) {{ 10 sub 3 sub 2 }} sub");
-            let expr = parse_source(&src);
-            let Expr::Let(_, _, assign, _) = expr.0 else {
-                panic!("expected let expression");
+        for (keyword, assoc) in [("opl", OpAssoc::Left), ("opr", OpAssoc::Right)] {
+            let src = format!("let {keyword} 1 sub = fn(a, b) {{ 10 sub 3 sub 2 }} sub");
+            let body = match assoc {
+                OpAssoc::Left => op(op(int(10), "sub", int(3)), "sub", int(2)),
+                OpAssoc::Right => op(int(10), "sub", op(int(3), "sub", int(2))),
             };
-            let Expr::Fn(_, body) = assign.0 else {
-                panic!("expected function expression");
-            };
-            assert_eq!(body.0.to_string(), expected);
+            assert_ast!(
+                src.as_str(),
+                binding(
+                    Some((assoc, 1)),
+                    "sub",
+                    function(vec!["a", "b"], body),
+                    var("sub")
+                )
+            );
         }
     }
 
     #[test]
     fn test_builtin_operator_fixity_can_be_shadowed() {
-        assert_source_eval("let subtract = - let opr 4 - = subtract 10 - 3 - 2", 9);
-        assert_source_eval("let add = + let opl 5 + = add 2 + 3 * 4", 20);
+        assert_ast!(
+            "let subtract = - let opr 4 - = subtract 10 - 3 - 2",
+            binding(
+                None,
+                "subtract",
+                var("-"),
+                binding(
+                    Some((OpAssoc::Right, 4)),
+                    "-",
+                    var("subtract"),
+                    op(int(10), "-", op(int(3), "-", int(2)))
+                )
+            )
+        );
+        assert_ast!(
+            "let add = + let opl 5 + = add 2 + 3 * 4",
+            binding(
+                None,
+                "add",
+                var("+"),
+                binding(
+                    Some((OpAssoc::Left, 5)),
+                    "+",
+                    var("add"),
+                    op(op(int(2), "+", int(3)), "*", int(4))
+                )
+            )
+        );
     }
 
     #[test]
@@ -1097,9 +1542,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(specs.0, vec![("sub", OpAssoc::Right, 7)]);
-        let Expr::Let(_, _, _, body) = expr.0 else {
-            panic!("expected let expression");
-        };
-        assert_eq!(body.0.to_string(), "(10 sub (3 sub 2))");
+        let expected = binding(
+            Some((OpAssoc::Left, 0)),
+            "unused",
+            function(vec!["a", "b"], var("a")),
+            op(int(10), "sub", op(int(3), "sub", int(2))),
+        );
+        assert!(
+            expr.spanless_eq(&expected),
+            "Expected: {expected:?}\nGot: {expr:?}"
+        );
     }
 }

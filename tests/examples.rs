@@ -1,5 +1,8 @@
 use std::path::Path;
-use std::process::{Command, Output};
+
+mod common;
+
+use common::{assert_failure, assert_source_diagnostic, assert_success, run_file};
 
 const FIB_STDOUT: &str = "Returned: 55\n";
 const CONS_STDOUT: &str = concat!(
@@ -9,52 +12,25 @@ const CONS_STDOUT: &str = concat!(
     "Returned: 0\n",
 );
 
-fn run_file(path: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_eel"))
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
-        .output()
-        .expect("failed to run eel")
-}
-
-fn is_successful_example(output: &Output, expected_stdout: &str) -> bool {
-    output.status.success()
-        && output.stdout == expected_stdout.as_bytes()
-        && output.stderr.is_empty()
-}
-
 fn assert_example(path: &str, expected_stdout: &str) {
-    let output = run_file(path);
-    assert!(
-        is_successful_example(&output, expected_stdout),
-        "unexpected result for {path}:\nstatus: {}\nexpected stdout:\n{expected_stdout}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+    let output = run_file(Path::new(env!("CARGO_MANIFEST_DIR")).join(path));
+    assert_success(&output, expected_stdout, "");
 }
 
 #[test]
-fn fibonacci_example_returns_55() {
+fn test_fibonacci_example_returns_55() {
     assert_example("examples/fib.eel", FIB_STDOUT);
 }
 
 #[test]
-fn cons_example_prints_lists_and_length_then_returns_zero() {
+fn test_cons_example_prints_lists_and_length_then_returns_zero() {
     assert_example("examples/cons.eel", CONS_STDOUT);
 }
 
 #[test]
-fn invalid_source_cannot_pass_example_checks() {
-    let output = run_file("tests/fixtures/invalid-example.eel");
-
-    // Do not depend on the CLI's failure exit code: diagnostics alone must also
-    // prevent an invalid program from passing the example conformance checks.
-    let diagnostics = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    assert!(diagnostics.contains("Error"), "{diagnostics}");
-    assert!(!is_successful_example(&output, FIB_STDOUT));
-    assert!(!is_successful_example(&output, CONS_STDOUT));
+fn test_invalid_example_fails_with_source_diagnostic() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/invalid-example.eel");
+    let output = run_file(&path);
+    assert_failure(&output, "Parsing failed");
+    assert_source_diagnostic(&output, &path);
 }

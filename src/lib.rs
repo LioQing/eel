@@ -7,11 +7,12 @@ use std::{
 use ariadne::{Color, Label, Report, ReportKind, sources};
 use chumsky::prelude::*;
 
-mod ast;
 mod builtin;
 mod declare;
+mod fixity;
 mod interp;
 mod lex;
+mod parse;
 
 #[derive(Debug)]
 pub enum RunError {
@@ -78,7 +79,7 @@ pub fn run(filename: impl AsRef<Path>) -> Result<(), RunError> {
     let toks = toks.ok_or(RunError::Lex)?;
 
     let eoi = (src.len()..src.len()).into();
-    let (expr, ast_errs) = ast::expr_parser()
+    let (expr, ast_errs) = fixity::resolve_parser(parse::expr_parser())
         .parse_with_state(
             toks.as_slice().map(eoi, |(t, s)| (t, s)),
             &mut extra::SimpleState(vec![]),
@@ -96,6 +97,7 @@ pub fn run(filename: impl AsRef<Path>) -> Result<(), RunError> {
         .map_err(RunError::Output)?;
         return Err(RunError::Parse);
     }
+
     let expr = expr.ok_or(RunError::Parse)?;
 
     match interp::eval(&expr, builtin::env()) {

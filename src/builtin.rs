@@ -35,7 +35,7 @@ macro_rules! builtin {
 
         let toks = crate::lex::lexer().parse(src).unwrap();
 
-        let ast = crate::ast::expr_parser()
+        let ast = crate::fixity::resolve_parser(crate::parse::expr_parser())
             .parse_with_state(
                 toks.as_slice()
                     .map((src.len()..src.len()).into(), |(t, s)| (t, s)),

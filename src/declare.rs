@@ -175,7 +175,44 @@ mod parse {
 
     impl SpanlessPartialEq for SyntaxExpr<'_> {
         fn spanless_eq(&self, other: &Self) -> bool {
-            self.eq(other)
+            match (self, other) {
+                (SyntaxExpr::Atom(l), SyntaxExpr::Atom(r)) => l.spanless_eq(r),
+                (SyntaxExpr::Call(l_func, l_args), SyntaxExpr::Call(r_func, r_args)) => {
+                    l_func.spanless_eq(r_func) && l_args.spanless_eq(r_args)
+                }
+                (SyntaxExpr::Fn(l_params, l_body), SyntaxExpr::Fn(r_params, r_body)) => {
+                    l_params.spanless_eq(r_params) && l_body.spanless_eq(r_body)
+                }
+                (SyntaxExpr::Case(l_expr, l_arms), SyntaxExpr::Case(r_expr, r_arms)) => {
+                    l_expr.spanless_eq(r_expr)
+                        && l_arms.0.len() == r_arms.0.len()
+                        && l_arms.0.iter().zip(&r_arms.0).all(
+                            |((l_patt, l_body), (r_patt, r_body))| {
+                                l_patt.spanless_eq(r_patt) && l_body.spanless_eq(r_body)
+                            },
+                        )
+                }
+                (SyntaxExpr::Ops(l_first, l_rest), SyntaxExpr::Ops(r_first, r_rest)) => {
+                    l_first.spanless_eq(r_first)
+                        && l_rest.len() == r_rest.len()
+                        && l_rest
+                            .iter()
+                            .zip(r_rest)
+                            .all(|((l_op, l_rhs), (r_op, r_rhs))| {
+                                l_op.spanless_eq(r_op) && l_rhs.spanless_eq(r_rhs)
+                            })
+                }
+                (
+                    SyntaxExpr::Let(l_spec, l_name, l_assign, l_body),
+                    SyntaxExpr::Let(r_spec, r_name, r_assign, r_body),
+                ) => {
+                    l_spec == r_spec
+                        && l_name == r_name
+                        && l_assign.spanless_eq(r_assign)
+                        && l_body.spanless_eq(r_body)
+                }
+                _ => false,
+            }
         }
     }
 

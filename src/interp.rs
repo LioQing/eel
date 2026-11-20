@@ -3,15 +3,23 @@ use std::rc::Rc;
 use crate::declare::*;
 
 fn closure_env<'src>(closure: &Value<'src>) -> Env<'src> {
-    let Value::Closure(name, _, _, captured_env) = closure else {
+    let Value::Closure(_, rec_name, params, body, captured_env) = closure else {
         unreachable!();
     };
 
     let mut env = captured_env.clone();
-    if let Some(name) = name {
+    if let Some(rec_name) = *rec_name {
         // Recreate the recursive binding when applying the closure, so its
         // retained environment never needs to contain a cycle back to itself.
-        env.insert_mut(name, Rc::new(closure.clone()));
+        // Recursive calls use the definition's name, even through an alias.
+        let recursive = Value::Closure(
+            Some(rec_name),
+            Some(rec_name),
+            params.clone(),
+            body.clone(),
+            captured_env.clone(),
+        );
+        env.insert_mut(rec_name, Rc::new(recursive));
     }
     env
 }
@@ -39,7 +47,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
         Expr::Call(f, args) => match eval(f, env.clone())? {
             closure @ Value::Closure(..) => {
                 let mut applied_env = closure_env(&closure);
-                let Value::Closure(name, params, body, _) = closure else {
+                let Value::Closure(name, _, params, body, _) = closure else {
                     unreachable!();
                 };
                 if params.len() != args.0.len() {
@@ -90,7 +98,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 });
             }
         },
-        Expr::Fn(params, body) => Value::Closure(None, params.0.clone(), body.clone(), env),
+        Expr::Fn(params, body) => Value::Closure(None, None, params.0.clone(), body.clone(), env),
         Expr::Case(e, arms) => {
             let v = eval(e, env.clone())?;
 
@@ -111,7 +119,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
         Expr::Op(e1, op, e2) => match eval(op, env.clone())? {
             closure @ Value::Closure(..) => {
                 let mut new_env = closure_env(&closure);
-                let Value::Closure(name, params, body, _) = closure else {
+                let Value::Closure(name, _, params, body, _) = closure else {
                     unreachable!();
                 };
                 if params.len() != 2 {
@@ -145,15 +153,11 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
         Expr::Let(_, x, e, body) => {
             let mut v = eval(e, env.clone())?;
 
-            let recursive_binding = match &v {
-                Value::Closure(Some(name), _, _, _) if name != x => Some((*name, v.clone())),
-                _ => None,
-            };
-            if let Value::Closure(name, _, _, captured_env) = &mut v {
-                // An alias keeps the original function's recursive binding,
-                // even though its display and struct name follow the new let.
-                if let Some((original_name, original)) = recursive_binding {
-                    captured_env.insert_mut(original_name, Rc::new(original));
+            if let Value::Closure(name, rec_name, ..) = &mut v {
+                // Only a function definition introduces a recursive binding.
+                // Other lets can name a closure without changing its scope.
+                if matches!(&e.0, Expr::Fn(..)) {
+                    *rec_name = Some(x);
                 }
                 *name = Some(x);
             }
@@ -321,6 +325,7 @@ mod tests {
                 "id",
                 Value::Closure(
                     Some("id"),
+                    None,
                     vec!["y"],
                     Box::new(spanned(Expr::Var("y"))),
                     Default::default(),
@@ -343,6 +348,7 @@ mod tests {
     #[test]
     fn test_call_closure() {
         let id = Value::Closure(
+            Some("id"),
             Some("id"),
             vec!["y"],
             Box::new(spanned(Expr::Var("y"))),
@@ -412,7 +418,13 @@ mod tests {
         assert_eval(
             expr,
             env.clone(),
-            Value::Closure(None, vec!["y"], Box::new(spanned(Expr::Var("y"))), env),
+            Value::Closure(
+                None,
+                None,
+                vec!["y"],
+                Box::new(spanned(Expr::Var("y"))),
+                env,
+            ),
         );
     }
 
@@ -420,17 +432,17 @@ mod tests {
     fn test_closures_share_snapshot_until_shadowing() {
         let env = env_from([("x", Value::Int(1)), ("y", Value::Int(2))]);
         let function = function(vec![], var("x"));
-        let Value::Closure(_, _, _, first) = eval(&function, env.clone()).unwrap() else {
+        let Value::Closure(.., first) = eval(&function, env.clone()).unwrap() else {
             panic!("expected a closure");
         };
-        let Value::Closure(_, _, _, second) = eval(&function, env.clone()).unwrap() else {
+        let Value::Closure(.., second) = eval(&function, env.clone()).unwrap() else {
             panic!("expected a closure");
         };
         assert!(first.ptr_eq(&env));
         assert!(second.ptr_eq(&first));
 
         let shadow = binding("x", int(42), function);
-        let Value::Closure(_, _, _, shadowed) = eval(&shadow, env.clone()).unwrap() else {
+        let Value::Closure(.., shadowed) = eval(&shadow, env.clone()).unwrap() else {
             panic!("expected a closure");
         };
         assert!(!shadowed.ptr_eq(&first));
@@ -455,7 +467,7 @@ mod tests {
         let env = env_from([("value", value.clone())]);
         let force = call(var("value"), vec![]);
         for _ in 0..2 {
-            let Value::Closure(_, _, _, captured_env) = eval(&force, env.clone()).unwrap() else {
+            let Value::Closure(.., captured_env) = eval(&force, env.clone()).unwrap() else {
                 panic!("expected a closure");
             };
             assert!(captured_env.ptr_eq(applied_env));
@@ -533,6 +545,7 @@ mod tests {
             expr,
             env.clone(),
             Value::Closure(
+                Some("id"),
                 Some("id"),
                 vec!["y"],
                 Box::new(spanned(Expr::Var("y"))),
@@ -666,6 +679,7 @@ mod tests {
     fn test_caller_bindings_do_not_replace_lexical_bindings() {
         let closure = Value::Closure(
             Some("f"),
+            None,
             vec![],
             Box::new(var("x")),
             env_from([("x", Value::Int(42))]),
@@ -682,6 +696,7 @@ mod tests {
     fn test_parameters_shadow_captured_bindings() {
         let closure = Value::Closure(
             Some("make"),
+            None,
             vec!["x"],
             Box::new(function(vec![], var("x"))),
             env_from([("x", Value::Int(99))]),
@@ -836,6 +851,7 @@ mod tests {
     fn test_caller_cannot_supply_missing_lexical_binding() {
         let closure = Value::Closure(
             Some("f"),
+            None,
             vec![],
             Box::new((Expr::Var("x"), (12..13).into())),
             Default::default(),

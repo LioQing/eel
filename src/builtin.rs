@@ -10,6 +10,7 @@ macro_rules! builtin {
             $name,
             Value::Closure(
                 Some($name),
+                None,
                 vec![$(stringify!($param)),*],
                 Box::new(Spanned::new(Expr::Builtin(|expr, env| {
                     #[allow(unused_variables)]
@@ -47,6 +48,7 @@ macro_rules! builtin {
             $name,
             Value::Closure(
                 Some($name),
+                None,
                 vec![$(stringify!($param)),*],
                 Box::new(Spanned::new(ast.0, 0..0)),
                 Default::default(),
@@ -294,6 +296,7 @@ mod tests {
             name,
             Value::Closure(
                 Some(name),
+                None,
                 params,
                 Box::new((body.0, (0..0).into())),
                 Default::default(),
@@ -356,6 +359,7 @@ mod tests {
             value,
             Value::Closure(
                 Some("b"),
+                None,
                 vec!["a", "b"],
                 Box::new(expected),
                 Default::default()
@@ -859,6 +863,7 @@ mod tests {
     #[test]
     fn test_inequality_rejects_unsupported_values() {
         let closure = Value::Closure(
+            None,
             None,
             vec!["x"],
             Box::new(spanned(Expr::Var("x"))),

@@ -123,6 +123,39 @@ fn test_recursive_alias_keeps_original_recursive_binding() {
 }
 
 #[test]
+fn test_function_alias_does_not_shadow_captured_binding() {
+    assert_returned(
+        "let helper = 42
+         let f = fn() { helper }
+         let helper = f
+         helper().",
+        42,
+    );
+}
+
+#[test]
+fn test_naming_returned_closure_does_not_introduce_recursive_binding() {
+    assert_returned(
+        "let f = 42
+         let make = fn() { fn() { f } }
+         let f = make().
+         f().",
+        42,
+    );
+}
+
+#[test]
+fn test_recursive_calls_keep_definition_struct_name_through_alias() {
+    assert_returned(
+        "let f = fn(n) { f(42) }
+         let alias = f
+         let value = alias(0)
+         case value { alias(0) => { case value. { f(n) => n } } }",
+        42,
+    );
+}
+
+#[test]
 fn test_escaped_struct_retains_recursive_binding() {
     assert_returned(
         "let value = {

@@ -246,7 +246,8 @@ mod fixity {
         Float(f64),
         Int(i64),
         Closure(
-            Option<&'src str>,
+            Option<&'src str>, // Display and struct name
+            Option<&'src str>, // Recursive name from the definition
             Vec<&'src str>,
             Box<Spanned<Expr<'src>>>,
             Env<'src>,
@@ -265,12 +266,16 @@ mod fixity {
                 Value::Unit => write!(f, "unit"),
                 Value::Float(value) => write!(f, "{value}"),
                 Value::Int(value) => write!(f, "{value}"),
-                Value::Closure(name, params, body, _) => {
+                Value::Closure(name, rec_name, params, body, _) => {
                     write!(
                         f,
-                        "fn{}({}) {{ {} }}",
+                        "fn{}{}({}) {{ {} }}",
                         match name {
                             Some(n) => format!(" {n}"),
+                            None => String::new(),
+                        },
+                        match rec_name {
+                            Some(n) => format!("`{n}`"),
                             None => String::new(),
                         },
                         params
@@ -286,8 +291,7 @@ mod fixity {
                         f,
                         "{}({}) {{ {} }}",
                         name.unwrap_or(""),
-                        args
-                            .iter()
+                        args.iter()
                             .map(|(k, v)| format!("{k}={v}"))
                             .collect::<Vec<_>>()
                             .join(", "),
@@ -321,8 +325,7 @@ mod fixity {
                         f,
                         "{}({})",
                         name,
-                        args
-                            .0
+                        args.0
                             .iter()
                             .map(|p| p.0.to_string())
                             .collect::<Vec<_>>()

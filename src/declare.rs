@@ -233,8 +233,6 @@ mod parse {
     }
 
     pub type OpSpec<'src> = (&'src str, OpAssoc, i64);
-
-    pub type OpSpecs<'src> = extra::SimpleState<Vec<OpSpec<'src>>>;
 }
 
 mod fixity {

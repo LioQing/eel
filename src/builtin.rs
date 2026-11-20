@@ -36,13 +36,13 @@ macro_rules! builtin {
 
         let toks = crate::lex::lexer().parse(src).unwrap();
 
-        let ast = crate::fixity::resolve_parser(crate::parse::expr_parser())
-            .parse_with_state(
+        let syntax = crate::parse::expr_parser()
+            .parse(
                 toks.as_slice()
                     .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
-                &mut extra::SimpleState(vec![]),
             )
             .unwrap();
+        let ast = crate::fixity::resolve(syntax, &[]);
 
         (
             $name,

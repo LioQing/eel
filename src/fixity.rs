@@ -1,30 +1,4 @@
-use chumsky::{input::ValueInput, prelude::*};
-
 use crate::declare::*;
-
-pub fn resolve_parser<
-    'toks,
-    'src: 'toks,
-    I: ValueInput<'toks, Token = Token<'src>, Span = Span>,
-    P: Parser<
-            'toks,
-            I,
-            Spanned<SyntaxExpr<'src>>,
-            extra::Full<Rich<'toks, Token<'src>, Span>, OpSpecs<'src>, ()>,
-        > + Clone,
->(
-    parser: P,
-) -> impl Parser<
-    'toks,
-    I,
-    Spanned<Expr<'src>>,
-    extra::Full<Rich<'toks, Token<'src>, Span>, OpSpecs<'src>, ()>,
-> + Clone {
-    parser.map_with(|expr, e| {
-        let specs: &mut OpSpecs<'src> = e.state();
-        resolve(expr, &specs.0)
-    })
-}
 
 fn op_spec(op: &Spanned<Expr<'_>>, specs: &[OpSpec<'_>]) -> (OpAssoc, i64) {
     if let Expr::Var(name) = &op.0 {
@@ -67,7 +41,7 @@ fn shadow_patt<'src>(patt: &Patt<'src>, specs: &mut Vec<OpSpec<'src>>) {
     }
 }
 
-fn resolve<'src>(
+pub fn resolve<'src>(
     (expr, span): Spanned<SyntaxExpr<'src>>,
     specs: &[OpSpec<'src>],
 ) -> Spanned<Expr<'src>> {
@@ -142,6 +116,8 @@ fn resolve<'src>(
 
 #[cfg(test)]
 mod tests {
+    use chumsky::span::Span;
+
     use super::*;
 
     fn spanned<T: Clone>(value: T) -> Spanned<T> {
@@ -1053,7 +1029,7 @@ mod tests {
     }
 
     #[test]
-    fn test_supplied_operator_specs_are_used_without_scope_mutation() {
+    fn test_supplied_operator_specs_are_used() {
         let spec = Some((OpAssoc::Left, 0));
         let syntax = syntax_binding(
             spec,
@@ -1061,15 +1037,8 @@ mod tests {
             syntax_function(vec!["a", "b"], syntax_var("a")),
             sub_chain(),
         );
-        // Supply the syntax directly through a stub parser to exercise the adapter's state.
-        let tokens = [spanned(Token::Unit)];
-        let input = tokens.as_slice().map((0..0).into(), |(t, s)| (t, s));
-        let mut specs = extra::SimpleState(vec![("sub", OpAssoc::Right, 7)]);
-        let expr = resolve_parser(just(Token::Unit).to(syntax))
-            .parse_with_state(input, &mut specs)
-            .unwrap();
+        let expr = resolve(syntax, &[("sub", OpAssoc::Right, 7)]);
 
-        assert_eq!(specs.0, vec![("sub", OpAssoc::Right, 7)]);
         assert_eq!(
             expr,
             binding(

@@ -3,12 +3,8 @@ use chumsky::{input::ValueInput, prelude::*};
 use crate::declare::*;
 
 pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>, Span = Span>>()
--> impl Parser<
-    'toks,
-    I,
-    Spanned<SyntaxExpr<'src>>,
-    extra::Full<Rich<'toks, Token<'src>, Span>, OpSpecs<'src>, ()>,
-> + Clone {
+-> impl Parser<'toks, I, Spanned<SyntaxExpr<'src>>, extra::Err<Rich<'toks, Token<'src>, Span>>> + Clone
+{
     recursive(|expr| {
         let value = select! {
             Token::Float(v) => Value::Float(v),
@@ -192,10 +188,9 @@ mod tests {
             let toks = lex::lexer().parse(src).unwrap();
 
             let (ast, errs) = expr_parser()
-                .parse_with_state(
+                .parse(
                     toks.as_slice()
                         .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
-                    &mut extra::SimpleState(vec![]),
                 )
                 .into_output_errors();
 

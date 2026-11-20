@@ -79,18 +79,15 @@ pub fn run(filename: impl AsRef<Path>) -> Result<(), RunError> {
     let toks = toks.ok_or(RunError::Lex)?;
 
     let eoi = (src.len()..src.len()).into();
-    let (expr, ast_errs) = fixity::resolve_parser(parse::expr_parser())
-        .parse_with_state(
-            toks.as_slice().map(eoi, |(t, s)| (t, s)),
-            &mut extra::SimpleState(vec![]),
-        )
+    let (syntax, parse_errs) = parse::expr_parser()
+        .parse(toks.as_slice().map(eoi, |(t, s)| (t, s)))
         .into_output_errors();
 
-    if !ast_errs.is_empty() {
+    if !parse_errs.is_empty() {
         print_errs(
             filename,
             &src,
-            ast_errs
+            parse_errs
                 .into_iter()
                 .map(|e| e.map_token(|tok| tok.to_string())),
         )
@@ -98,7 +95,7 @@ pub fn run(filename: impl AsRef<Path>) -> Result<(), RunError> {
         return Err(RunError::Parse);
     }
 
-    let expr = expr.ok_or(RunError::Parse)?;
+    let expr = fixity::resolve(syntax.ok_or(RunError::Parse)?, &[]);
 
     match interp::eval(&expr, builtin::env()) {
         Ok(v) => writeln!(io::stdout().lock(), "Returned: {v}").map_err(RunError::Output),

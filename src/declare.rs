@@ -238,8 +238,6 @@ mod parse {
 }
 
 mod fixity {
-    use std::rc::Rc;
-
     use super::*;
 
     #[derive(Debug, Clone, PartialEq)]
@@ -251,13 +249,13 @@ mod fixity {
             Option<&'src str>,
             Vec<&'src str>,
             Box<Spanned<Expr<'src>>>,
-            Rc<Env<'src>>,
+            Env<'src>,
         ),
         Struct(
             Option<&'src str>,
             Box<Spanned<Expr<'src>>>,
+            StructArgs<'src>,
             Env<'src>,
-            Rc<Env<'src>>,
         ),
     }
 
@@ -283,12 +281,12 @@ mod fixity {
                         body.0,
                     )
                 }
-                Value::Struct(name, expr, args_env, _) => {
+                Value::Struct(name, expr, args, _) => {
                     write!(
                         f,
                         "{}({}) {{ {} }}",
                         name.unwrap_or(""),
-                        args_env
+                        args
                             .iter()
                             .map(|(k, v)| format!("{k}={v}"))
                             .collect::<Vec<_>>()
@@ -318,12 +316,12 @@ mod fixity {
             match self {
                 Patt::Var(ident) => write!(f, "{ident}"),
                 Patt::Lit(value) => write!(f, "{value}"),
-                Patt::Struct(name, fields) => {
+                Patt::Struct(name, args) => {
                     write!(
                         f,
                         "{}({})",
                         name,
-                        fields
+                        args
                             .0
                             .iter()
                             .map(|p| p.0.to_string())
@@ -340,8 +338,8 @@ mod fixity {
             match (self, other) {
                 (Patt::Var(l), Patt::Var(r)) => l == r,
                 (Patt::Lit(l), Patt::Lit(r)) => l.spanless_eq(r),
-                (Patt::Struct(l_name, l_fields), Patt::Struct(r_name, r_fields)) => {
-                    l_name == r_name && l_fields.spanless_eq(r_fields)
+                (Patt::Struct(l_name, l_args), Patt::Struct(r_name, r_args)) => {
+                    l_name == r_name && l_args.spanless_eq(r_args)
                 }
                 _ => false,
             }
@@ -472,6 +470,8 @@ mod fixity {
 }
 
 mod interp {
+    use std::rc::Rc;
+
     use super::*;
 
     #[derive(Debug, Clone, PartialEq)]
@@ -480,5 +480,7 @@ mod interp {
         pub span: Span,
     }
 
-    pub type Env<'src> = Vec<(&'src str, Value<'src>)>;
+    pub type Env<'src> = rpds::HashTrieMap<&'src str, Rc<Value<'src>>>;
+    pub type Bindings<'src> = Vec<(&'src str, Value<'src>)>;
+    pub type StructArgs<'src> = Rc<[(&'src str, Rc<Value<'src>>)]>;
 }

@@ -70,6 +70,16 @@ fn test_parameters_shadow_captured_bindings() {
 }
 
 #[test]
+fn test_repeated_parameter_names_preserve_positional_args() {
+    assert_returned(
+        "let pair = fn(x, x) { x }
+         let value = pair(20, 22)
+         case value { pair(first, 22) => { first + value. } }",
+        42,
+    );
+}
+
+#[test]
 fn test_returned_operator_retains_lexical_environment() {
     assert_returned(
         "let op = { let x = 40 fn(a, b) { x + (a + b) } } 1 op 1",

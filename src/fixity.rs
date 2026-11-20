@@ -58,8 +58,8 @@ fn reduce_op<'src>(operands: &mut Vec<Spanned<Expr<'src>>>, op: Spanned<Expr<'sr
 fn shadow_patt<'src>(patt: &Patt<'src>, specs: &mut Vec<OpSpec<'src>>) {
     match patt {
         Patt::Var(name) => specs.push((name, OpAssoc::Left, 0)),
-        Patt::Struct(_, fields) => {
-            for (patt, _) in &fields.0 {
+        Patt::Struct(_, args) => {
+            for (patt, _) in &args.0 {
                 shadow_patt(patt, specs);
             }
         }

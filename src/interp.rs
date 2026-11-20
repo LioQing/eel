@@ -7,13 +7,22 @@ fn closure_env<'src>(closure: &Value<'src>) -> Env<'src> {
         unreachable!();
     };
 
-    let mut env = captured_env.as_ref().clone();
+    let mut env = captured_env.clone();
     if let Some(name) = name {
         // Recreate the recursive binding when applying the closure, so its
         // retained environment never needs to contain a cycle back to itself.
-        env.push((name, closure.clone()));
+        env.insert_mut(name, Rc::new(closure.clone()));
     }
     env
+}
+
+fn extend_env<'src>(
+    env: &mut Env<'src>,
+    bindings: impl IntoIterator<Item = (&'src str, Value<'src>)>,
+) {
+    for (name, value) in bindings {
+        env.insert_mut(name, Rc::new(value));
+    }
 }
 
 pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'src>, Error> {
@@ -21,17 +30,15 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
         Expr::Err => unreachable!(), // Valid AST does not contain Expr::Err
         Expr::Lit(v) => v.clone(),
         Expr::Var(x) => env
-            .iter()
-            .rev()
-            .find(|(y, _)| y == x)
-            .map(|(_, v)| v.clone())
+            .get(*x)
+            .map(|v| v.as_ref().clone())
             .ok_or_else(|| Error {
                 msg: format!("Variable `{x}` not found"),
                 span: expr.1.clone(),
             })?,
         Expr::Call(f, args) => match eval(f, env.clone())? {
             closure @ Value::Closure(..) => {
-                let captured_env = Rc::new(closure_env(&closure));
+                let mut applied_env = closure_env(&closure);
                 let Value::Closure(name, params, body, _) = closure else {
                     unreachable!();
                 };
@@ -50,15 +57,18 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
 
                 let body = crate::builtin::body_at_call_site(body, f.1);
 
-                let args_env = params
+                let struct_args: StructArgs<'src> = params
                     .iter()
                     .zip(args.0.iter())
-                    .map(|(param, arg)| Ok((*param, eval(arg, env.clone())?)))
+                    .map(|(param, arg)| Ok((*param, Rc::new(eval(arg, env.clone())?))))
                     .collect::<Result<_, _>>()?;
 
-                Value::Struct(name, body, args_env, captured_env)
+                for (param, value) in struct_args.iter() {
+                    applied_env.insert_mut(*param, Rc::clone(value));
+                }
+                Value::Struct(name, body, struct_args, applied_env)
             }
-            Value::Struct(name, body, args_env, captured_env) => {
+            Value::Struct(name, body, _, applied_env) => {
                 if !args.0.is_empty() {
                     return Err(Error {
                         msg: format!(
@@ -71,10 +81,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let mut new_env = captured_env.as_ref().clone();
-                new_env.extend(args_env);
-
-                eval(&body, new_env)?
+                eval(&body, applied_env)?
             }
             f => {
                 return Err(Error {
@@ -83,9 +90,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 });
             }
         },
-        Expr::Fn(params, body) => {
-            Value::Closure(None, params.0.clone(), body.clone(), Rc::new(env))
-        }
+        Expr::Fn(params, body) => Value::Closure(None, params.0.clone(), body.clone(), env),
         Expr::Case(e, arms) => {
             let v = eval(e, env.clone())?;
 
@@ -99,7 +104,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 })?;
 
             let mut new_env = env;
-            new_env.extend(patt_env);
+            extend_env(&mut new_env, patt_env);
 
             eval(body, new_env)?
         }
@@ -126,7 +131,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 let arg1 = eval(e1, env.clone())?;
                 let arg2 = eval(e2, env.clone())?;
 
-                new_env.extend([(params[0], arg1), (params[1], arg2)]);
+                extend_env(&mut new_env, [(params[0], arg1), (params[1], arg2)]);
 
                 eval(&body, new_env)?
             }
@@ -147,14 +152,14 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
             if let Value::Closure(name, _, _, captured_env) = &mut v {
                 // An alias keeps the original function's recursive binding,
                 // even though its display and struct name follow the new let.
-                if let Some(binding) = recursive_binding {
-                    Rc::make_mut(captured_env).push(binding);
+                if let Some((original_name, original)) = recursive_binding {
+                    captured_env.insert_mut(original_name, Rc::new(original));
                 }
                 *name = Some(x);
             }
 
             let mut new_env = env;
-            new_env.push((x, v));
+            new_env.insert_mut(x, Rc::new(v));
 
             eval(body, new_env)?
         }
@@ -162,17 +167,17 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
     })
 }
 
-pub fn match_patt<'src>(patt: &Patt<'src>, value: &Value<'src>) -> Option<Env<'src>> {
+pub fn match_patt<'src>(patt: &Patt<'src>, value: &Value<'src>) -> Option<Bindings<'src>> {
     match (patt, value) {
         (Patt::Lit(p), v) if p == v => Some(vec![]),
         (Patt::Var(x), _) => Some(vec![(x, value.clone())]),
-        (Patt::Struct(x, ps), Value::Struct(y, _, args_env, _)) if Some(*x) == *y => {
-            if ps.0.len() != args_env.len() {
+        (Patt::Struct(x, ps), Value::Struct(y, _, args, _)) if Some(*x) == *y => {
+            if ps.0.len() != args.len() {
                 return None;
             }
 
             let mut env = vec![];
-            for ((p, _), (_, v)) in ps.0.iter().zip(args_env.iter()) {
+            for ((p, _), (_, v)) in ps.0.iter().zip(args.iter()) {
                 if let Some(new_env) = match_patt(p, v) {
                     env.extend(new_env);
                 } else {
@@ -196,6 +201,12 @@ mod tests {
 
     fn spanned<T: Clone>(value: T) -> Spanned<T> {
         Spanned::new(value, 0..0)
+    }
+
+    fn env_from<'src>(bindings: impl IntoIterator<Item = (&'src str, Value<'src>)>) -> Env<'src> {
+        let mut env = Env::new();
+        extend_env(&mut env, bindings);
+        env
     }
 
     fn assert_eval<'src>(expr: Spanned<Expr<'src>>, env: Env<'src>, expected: Value<'src>) {
@@ -260,25 +271,30 @@ mod tests {
         ))
     }
 
-    fn struct_value<'src>(name: &'src str, fields: Env<'src>) -> Value<'src> {
+    fn struct_value<'src>(name: &'src str, args: Bindings<'src>) -> Value<'src> {
+        let args: StructArgs<'src> = args
+            .into_iter()
+            .map(|(name, v)| (name, Rc::new(v)))
+            .collect();
+        let env = args.iter().cloned().collect();
         Value::Struct(
             Some(name),
             Box::new(spanned(Expr::Lit(Value::Unit))),
-            fields,
-            Default::default(),
+            args,
+            env,
         )
     }
 
     fn struct_pattern<'src>(
         name: &'src str,
-        fields: Vec<Spanned<Patt<'src>>>,
+        args: Vec<Spanned<Patt<'src>>>,
     ) -> Spanned<Patt<'src>> {
-        spanned(Patt::Struct(name, spanned(fields)))
+        spanned(Patt::Struct(name, spanned(args)))
     }
 
     #[test]
     fn test_lit() {
-        let env = vec![("x", Value::Int(42)), ("y", Value::Float(3.14))];
+        let env = env_from([("x", Value::Int(42)), ("y", Value::Float(3.14))]);
 
         // 42
         let expr = spanned(Expr::Lit(Value::Int(43)));
@@ -288,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_var() {
-        let env = vec![("x", Value::Int(42)), ("y", Value::Float(3.14))];
+        let env = env_from([("x", Value::Int(42)), ("y", Value::Float(3.14))]);
 
         // x
         let expr = spanned(Expr::Var("x"));
@@ -298,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_call() {
-        let env = vec![
+        let env = env_from([
             ("x", Value::Int(42)),
             ("y", Value::Float(3.14)),
             (
@@ -310,7 +326,7 @@ mod tests {
                     Default::default(),
                 ),
             ),
-        ];
+        ]);
 
         // id(x)()
         let expr = spanned(Expr::Call(
@@ -332,11 +348,11 @@ mod tests {
             Box::new(spanned(Expr::Var("y"))),
             Default::default(),
         );
-        let env = vec![
+        let env = env_from([
             ("x", Value::Int(42)),
             ("y", Value::Float(3.14)),
             ("id", id.clone()),
-        ];
+        ]);
 
         // id(x)
         let expr = spanned(Expr::Call(
@@ -350,15 +366,17 @@ mod tests {
             Value::Struct(
                 Some("id"),
                 Box::new(spanned(Expr::Var("y"))),
-                vec![("y", Value::Int(42))],
-                Rc::new(vec![("id", id)]),
+                Rc::from([("y", Rc::new(Value::Int(42)))]),
+                env_from([("id", id), ("y", Value::Int(42))]),
             ),
         );
     }
 
     #[test]
     fn test_call_struct() {
-        let env = vec![
+        let x_arg = Rc::new(Value::Int(43));
+        let applied_env = env_from([("y", Value::Float(3.14))]).insert("x", Rc::clone(&x_arg));
+        let env = env_from([
             ("x", Value::Int(42)),
             ("y", Value::Float(3.14)),
             (
@@ -366,11 +384,11 @@ mod tests {
                 Value::Struct(
                     Some("x_struct"),
                     Box::new(spanned(Expr::Var("x"))),
-                    vec![("x", Value::Int(43))],
-                    Rc::new(vec![("x", Value::Int(42)), ("y", Value::Float(3.14))]),
+                    Rc::from([("x", x_arg)]),
+                    applied_env,
                 ),
             ),
-        ];
+        ]);
 
         // x_struct()
         let expr = spanned(Expr::Call(
@@ -383,7 +401,7 @@ mod tests {
 
     #[test]
     fn test_fn() {
-        let env = vec![("x", Value::Int(42)), ("y", Value::Float(3.14))];
+        let env = env_from([("x", Value::Int(42)), ("y", Value::Float(3.14))]);
 
         // fn(y) { y }
         let expr = spanned(Expr::Fn(
@@ -394,18 +412,59 @@ mod tests {
         assert_eval(
             expr,
             env.clone(),
-            Value::Closure(
-                None,
-                vec!["y"],
-                Box::new(spanned(Expr::Var("y"))),
-                Rc::new(env),
-            ),
+            Value::Closure(None, vec!["y"], Box::new(spanned(Expr::Var("y"))), env),
         );
     }
 
     #[test]
+    fn test_closures_share_snapshot_until_shadowing() {
+        let env = env_from([("x", Value::Int(1)), ("y", Value::Int(2))]);
+        let function = function(vec![], var("x"));
+        let Value::Closure(_, _, _, first) = eval(&function, env.clone()).unwrap() else {
+            panic!("expected a closure");
+        };
+        let Value::Closure(_, _, _, second) = eval(&function, env.clone()).unwrap() else {
+            panic!("expected a closure");
+        };
+        assert!(first.ptr_eq(&env));
+        assert!(second.ptr_eq(&first));
+
+        let shadow = binding("x", int(42), function);
+        let Value::Closure(_, _, _, shadowed) = eval(&shadow, env.clone()).unwrap() else {
+            panic!("expected a closure");
+        };
+        assert!(!shadowed.ptr_eq(&first));
+        assert_eq!(first.get("x").unwrap().as_ref(), &Value::Int(1));
+        assert_eq!(shadowed.get("x").unwrap().as_ref(), &Value::Int(42));
+        assert!(Rc::ptr_eq(
+            first.get("y").unwrap(),
+            shadowed.get("y").unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_struct_reuses_applied_snapshot_and_shares_args() {
+        let make = function(vec!["x"], function(vec![], var("x")));
+        let expr = call(make, vec![int(42)]);
+        let value = eval(&expr, Env::new()).unwrap();
+        let Value::Struct(_, _, args, applied_env) = &value else {
+            panic!("expected a struct");
+        };
+        assert!(Rc::ptr_eq(&args[0].1, applied_env.get("x").unwrap()));
+
+        let env = env_from([("value", value.clone())]);
+        let force = call(var("value"), vec![]);
+        for _ in 0..2 {
+            let Value::Closure(_, _, _, captured_env) = eval(&force, env.clone()).unwrap() else {
+                panic!("expected a closure");
+            };
+            assert!(captured_env.ptr_eq(applied_env));
+        }
+    }
+
+    #[test]
     fn test_case() {
-        let env = vec![("x", Value::Int(42)), ("y", Value::Float(3.14))];
+        let env = env_from([("x", Value::Int(42)), ("y", Value::Float(3.14))]);
 
         // case x {
         //     42 => y
@@ -427,11 +486,8 @@ mod tests {
 
     #[test]
     fn test_op() {
-        let env = vec![
-            ("x", Value::Int(42)),
-            ("y", Value::Int(3)),
-            builtin::env().into_iter().find(|(k, _)| *k == "+").unwrap(),
-        ];
+        let mut env = builtin::env();
+        extend_env(&mut env, [("x", Value::Int(42)), ("y", Value::Int(3))]);
 
         // x + y
         let expr = spanned(Expr::Op(
@@ -445,15 +501,8 @@ mod tests {
 
     #[test]
     fn test_op_ident() {
-        let env = vec![
-            ("x", Value::Int(42)),
-            ("y", Value::Int(3)),
-            builtin::env()
-                .into_iter()
-                .find(|(k, _)| *k == "+")
-                .map(|(_, v)| ("add", v))
-                .unwrap(),
-        ];
+        let mut env = env_from([("x", Value::Int(42)), ("y", Value::Int(3))]);
+        env.insert_mut("add", builtin::env().get("+").unwrap().clone());
 
         // x add y
         let expr = spanned(Expr::Op(
@@ -467,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_let_fn() {
-        let env = vec![("x", Value::Int(42)), ("y", Value::Float(3.14))];
+        let env = env_from([("x", Value::Int(42)), ("y", Value::Float(3.14))]);
 
         // let id = fn(y) { y } id
         let expr = spanned(Expr::Let(
@@ -487,14 +536,14 @@ mod tests {
                 Some("id"),
                 vec!["y"],
                 Box::new(spanned(Expr::Var("y"))),
-                Rc::new(env),
+                env,
             ),
         );
     }
 
     #[test]
     fn test_let() {
-        let env = vec![("x", Value::Int(42)), ("y", Value::Float(3.14))];
+        let env = env_from([("x", Value::Int(42)), ("y", Value::Float(3.14))]);
 
         // let z = x z
         let expr = spanned(Expr::Let(
@@ -510,7 +559,7 @@ mod tests {
     #[test]
     fn test_builtin() {
         let mut env = builtin::env();
-        env.extend([("x", Value::Int(42)), ("y", Value::Int(3))]);
+        extend_env(&mut env, [("x", Value::Int(42)), ("y", Value::Int(3))]);
 
         // +(x, y)()
         let expr = spanned(Expr::Call(
@@ -536,7 +585,7 @@ mod tests {
                 call(call(var("f"), vec![]), vec![]),
             ),
         );
-        assert_eval(expr, vec![], Value::Int(42));
+        assert_eval(expr, Env::new(), Value::Int(42));
     }
 
     #[test]
@@ -550,7 +599,7 @@ mod tests {
                 binding("padding", int(99), call(call(var("f"), vec![]), vec![])),
             ),
         );
-        assert_eval(expr, vec![], Value::Int(42));
+        assert_eval(expr, Env::new(), Value::Int(42));
     }
 
     #[test]
@@ -591,7 +640,7 @@ mod tests {
                 call(var("value"), vec![]),
             ),
         );
-        assert_eval(expr, vec![], Value::Int(42));
+        assert_eval(expr, Env::new(), Value::Int(42));
     }
 
     #[test]
@@ -610,7 +659,7 @@ mod tests {
                 binding("padding", int(99), call(var("value"), vec![])),
             ),
         );
-        assert_eval(expr, vec![], Value::Int(42));
+        assert_eval(expr, Env::new(), Value::Int(42));
     }
 
     #[test]
@@ -619,12 +668,12 @@ mod tests {
             Some("f"),
             vec![],
             Box::new(var("x")),
-            Rc::new(vec![("x", Value::Int(42))]),
+            env_from([("x", Value::Int(42))]),
         );
         let expr = call(call(var("f"), vec![]), vec![]);
         assert_eval(
             expr,
-            vec![("f", closure), ("x", Value::Int(99))],
+            env_from([("f", closure), ("x", Value::Int(99))]),
             Value::Int(42),
         );
     }
@@ -635,14 +684,14 @@ mod tests {
             Some("make"),
             vec!["x"],
             Box::new(function(vec![], var("x"))),
-            Rc::new(vec![("x", Value::Int(99))]),
+            env_from([("x", Value::Int(99))]),
         );
         let expr = binding(
             "f",
             call(call(var("make"), vec![int(42)]), vec![]),
             call(call(var("f"), vec![]), vec![]),
         );
-        assert_eval(expr, vec![("make", closure)], Value::Int(42));
+        assert_eval(expr, env_from([("make", closure)]), Value::Int(42));
     }
 
     #[test]
@@ -676,7 +725,7 @@ mod tests {
             ),
             call(call(var("f"), vec![]), vec![]),
         );
-        assert_eval(expr, vec![], Value::Int(42));
+        assert_eval(expr, Env::new(), Value::Int(42));
     }
 
     fn factorial<'src>() -> Spanned<Expr<'src>> {
@@ -766,7 +815,7 @@ mod tests {
             function(vec!["f"], var("f")),
             call(call(var("f"), vec![int(42)]), vec![]),
         );
-        assert_eval(expr, vec![], Value::Int(42));
+        assert_eval(expr, Env::new(), Value::Int(42));
     }
 
     #[test]
@@ -793,7 +842,7 @@ mod tests {
         );
         let expr = call(call(var("f"), vec![]), vec![]);
         assert_eq!(
-            eval(&expr, vec![("f", closure), ("x", Value::Int(42))]),
+            eval(&expr, env_from([("f", closure), ("x", Value::Int(42))])),
             Err(Error {
                 msg: "Variable `x` not found".into(),
                 span: (12..13).into()
@@ -802,8 +851,8 @@ mod tests {
     }
 
     #[test]
-    fn test_struct_pattern_requires_exact_field_arity() {
-        for (name, fields, patterns) in [
+    fn test_struct_pattern_requires_exact_arg_arity() {
+        for (name, args, patterns) in [
             (
                 "pair",
                 vec![("x", Value::Int(42)), ("y", Value::Int(7))],
@@ -819,33 +868,33 @@ mod tests {
             ),
             ("empty", vec![], vec![vec![spanned(Patt::Var("a"))]]),
         ] {
-            let value = struct_value(name, fields);
-            for fields in patterns {
-                let pattern = struct_pattern(name, fields);
+            let value = struct_value(name, args);
+            for arg_patterns in patterns {
+                let pattern = struct_pattern(name, arg_patterns);
                 assert_eq!(match_patt(&pattern.0, &value), None);
                 let expr = case(
                     spanned(Expr::Lit(value.clone())),
                     vec![(pattern, int(1)), (spanned(Patt::Var("_")), int(0))],
                 );
-                assert_eval(expr, vec![], Value::Int(0));
+                assert_eval(expr, Env::new(), Value::Int(0));
             }
         }
     }
 
     #[test]
-    fn test_struct_pattern_matches_zero_fields() {
+    fn test_struct_pattern_matches_zero_args() {
         let value = struct_value("empty", vec![]);
         let pattern = struct_pattern("empty", vec![]);
         assert_eq!(match_patt(&pattern.0, &value), Some(vec![]));
         assert_eval(
             case(spanned(Expr::Lit(value)), vec![(pattern, int(1))]),
-            vec![],
+            Env::new(),
             Value::Int(1),
         );
     }
 
     #[test]
-    fn test_struct_pattern_matches_exact_arity_and_binds_fields() {
+    fn test_struct_pattern_matches_exact_arity_and_binds_args() {
         let value = struct_value("pair", vec![("x", Value::Int(42)), ("y", Value::Int(7))]);
         let pattern = struct_pattern(
             "pair",
@@ -866,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn test_struct_pattern_matches_nested_fields_and_binds_values() {
+    fn test_struct_pattern_matches_nested_args_and_binds_values() {
         let value = struct_value(
             "pair",
             vec![
@@ -904,20 +953,23 @@ mod tests {
                 ("item", struct_value("inner", vec![("x", Value::Int(42))])),
             ],
         );
-        for fields in [
+        for arg_patterns in [
             vec![],
             vec![spanned(Patt::Var("a")), spanned(Patt::Var("b"))],
         ] {
             let pattern = struct_pattern(
                 "outer",
-                vec![spanned(Patt::Var("tag")), struct_pattern("inner", fields)],
+                vec![
+                    spanned(Patt::Var("tag")),
+                    struct_pattern("inner", arg_patterns),
+                ],
             );
             assert_eq!(match_patt(&pattern.0, &value), None);
             let expr = case(
                 spanned(Expr::Lit(value.clone())),
                 vec![(pattern, int(1)), (spanned(Patt::Var("_")), var("tag"))],
             );
-            assert_eval(expr, vec![("tag", Value::Int(99))], Value::Int(99));
+            assert_eval(expr, env_from([("tag", Value::Int(99))]), Value::Int(99));
         }
     }
 
@@ -946,6 +998,6 @@ mod tests {
                 (spanned(Patt::Var("_")), int(3)),
             ],
         );
-        assert_eval(expr, vec![], Value::Int(42));
+        assert_eval(expr, Env::new(), Value::Int(42));
     }
 }

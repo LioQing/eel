@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use chumsky::prelude::*;
 
 use crate::declare::*;
@@ -15,10 +17,8 @@ macro_rules! builtin {
                     #[allow(unused_variables)]
                     let $env = env;
                     $(
-                        let $param = env.iter()
-                            .rev()
-                            .find(|(y, _)| *y == stringify!($param))
-                            .map(|(_, v)| v)
+                        let $param = env.get(stringify!($param))
+                            .map(Rc::as_ref)
                             .ok_or_else(|| Error {
                                 msg: format!("Variable `{}` not found", stringify!($param)),
                                 span: expr.1.clone(),
@@ -105,10 +105,10 @@ fn set_expr_span(expr: &mut Spanned<Expr<'_>>, span: Span) {
 fn set_patt_span(patt: &mut Spanned<Patt<'_>>, span: Span) {
     patt.1 = span;
     match &mut patt.0 {
-        Patt::Struct(_, fields) => {
-            fields.1 = span;
-            for field in &mut fields.0 {
-                set_patt_span(field, span);
+        Patt::Struct(_, args) => {
+            args.1 = span;
+            for arg in &mut args.0 {
+                set_patt_span(arg, span);
             }
         }
         Patt::Var(_) | Patt::Lit(_) => {}
@@ -116,7 +116,7 @@ fn set_patt_span(patt: &mut Spanned<Patt<'_>>, span: Span) {
 }
 
 pub fn env<'src>() -> Env<'src> {
-    vec![
+    [
         builtin!("print" expr env [v] => {
             println!("{v}");
             Ok(v.clone())
@@ -262,6 +262,9 @@ pub fn env<'src>() -> Env<'src> {
             }
         }),
     ]
+    .into_iter()
+    .map(|(name, value)| (name, Rc::new(value)))
+    .collect()
 }
 
 #[cfg(test)]
@@ -322,7 +325,8 @@ mod tests {
         expected: Span,
         msg: &str,
     ) {
-        let error = interp::eval(&expr, vec![builtin]).unwrap_err();
+        let env = Env::new().insert(builtin.0, Rc::new(builtin.1));
+        let error = interp::eval(&expr, env).unwrap_err();
         assert_eq!(error.msg, msg);
         assert_eq!(error.span, expected);
         assert!(src.get(error.span.into_range()).is_some());
@@ -860,11 +864,14 @@ mod tests {
             Box::new(spanned(Expr::Var("x"))),
             Default::default(),
         );
+        let args: StructArgs<'_> =
+            Rc::from([("a", Rc::new(Value::Int(1))), ("b", Rc::new(Value::Int(2)))]);
+        let applied_env = args.iter().cloned().collect();
         let deferred = Value::Struct(
             Some("+"),
             Box::new(spanned(Expr::Lit(Value::Int(3)))),
-            vec![("a", Value::Int(1)), ("b", Value::Int(2))],
-            Default::default(),
+            args,
+            applied_env,
         );
         for (a, b) in [
             (Value::Int(1), Value::Float(1.0)),
@@ -907,7 +914,9 @@ mod tests {
             );
             let result = interp::eval(&expr, env());
             assert!(
-                matches!(result, Ok(Value::Struct(Some("!="), _, ref args, _)) if args == &vec![("a", Value::Int(1)), ("b", value)]),
+                matches!(result, Ok(Value::Struct(Some("!="), _, ref args, _))
+                    if args.iter().map(|(name, v)| (*name, v.as_ref()))
+                        .eq([("a", &Value::Int(1)), ("b", &value)])),
                 "{expr:?}: {result:?}"
             );
         }

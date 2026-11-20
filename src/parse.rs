@@ -97,7 +97,7 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
                         .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
                         .map_with(|patt, e| (patt, e.span())),
                 )
-                .map(|(name, fields)| Patt::Struct(name, fields))
+                .map(|(name, args)| Patt::Struct(name, args))
                 .labelled("struct pattern");
             let var = ident.map(Patt::Var).labelled("variable pattern");
             let lit = value.map(Patt::Lit).labelled("literal pattern");

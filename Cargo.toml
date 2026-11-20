@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 chumsky = "0.10"
 ariadne = "0.5"
+rpds = "1.2"

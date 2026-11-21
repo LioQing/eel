@@ -2,6 +2,35 @@ use chumsky::{input::ValueInput, prelude::*};
 
 use crate::declare::*;
 
+fn let_head<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>, Span = Span>>()
+-> impl Parser<'toks, I, LetHead<'src>, extra::Err<Rich<'toks, Token<'src>, Span>>> + Clone {
+    just(Token::Let)
+        .ignore_then(
+            just(Token::Opl)
+                .to(OpAssoc::Left)
+                .or(just(Token::Opr).to(OpAssoc::Right))
+                .then(select! { Token::Int(v) => v })
+                .or_not(),
+        )
+        .then(select! { Token::Ident(x) => x }.labelled("identifier"))
+        .then_ignore(just(Token::Assign))
+}
+
+pub fn repl_item_parser<
+    'toks,
+    'src: 'toks,
+    I: ValueInput<'toks, Token = Token<'src>, Span = Span>,
+>() -> impl Parser<'toks, I, ReplItem<'src>, extra::Err<Rich<'toks, Token<'src>, Span>>> {
+    let expr = expr_parser();
+
+    let_head()
+        .then(expr.clone())
+        .then_ignore(end())
+        .map(|((op_spec, name), expr)| ReplItem::Let(op_spec, name, expr))
+        .labelled("let declaration")
+        .or(expr.map(ReplItem::Expr))
+}
+
 pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>, Span = Span>>()
 -> impl Parser<'toks, I, Spanned<SyntaxExpr<'src>>, extra::Err<Rich<'toks, Token<'src>, Span>>> + Clone
 {
@@ -131,16 +160,7 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
                 .map_with(|(first, rest), e| (SyntaxExpr::Ops(Box::new(first), rest), e.span())),
         );
 
-        let r#let = just(Token::Let)
-            .ignore_then(
-                just(Token::Opl)
-                    .to(OpAssoc::Left)
-                    .or(just(Token::Opr).to(OpAssoc::Right))
-                    .then(select! { Token::Int(v) => v })
-                    .or_not(),
-            )
-            .then(ident)
-            .then_ignore(just(Token::Assign))
+        let r#let = let_head()
             .then(inline.clone())
             .then(expr.clone())
             .map(|(((op_spec, x), assign), body)| {
@@ -687,5 +707,85 @@ mod tests {
                 ))),
             )),
         );
+    }
+
+    fn parse_repl_item(src: &str) -> Result<ReplItem<'_>, Vec<String>> {
+        let toks = lex::lexer().parse(src).unwrap();
+        repl_item_parser()
+            .parse(
+                toks.as_slice()
+                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+            )
+            .into_result()
+            .map_err(|errors| errors.into_iter().map(|error| error.to_string()).collect())
+    }
+
+    #[test]
+    fn test_repl_item_accepts_standalone_let_with_infix_expr() {
+        let item = parse_repl_item("let x = 2 + 3 * 4").unwrap();
+        let ReplItem::Let(op_spec, name, expr) = item else {
+            panic!("Expected declaration, got {item:?}");
+        };
+        assert_eq!(op_spec, None);
+        assert_eq!(name, "x");
+        assert!(expr.spanless_eq(&ops(
+            atom(Expr::Lit(Value::Int(2))),
+            vec![
+                ("+", atom(Expr::Lit(Value::Int(3)))),
+                ("*", atom(Expr::Lit(Value::Int(4))))
+            ],
+        )));
+    }
+
+    #[test]
+    fn test_repl_item_accepts_operator_declaration() {
+        let item = parse_repl_item("let opr 3 sub = fn(a, b) {\n    a - b\n}").unwrap();
+        let ReplItem::Let(op_spec, name, expr) = item else {
+            panic!("Expected declaration, got {item:?}");
+        };
+        assert_eq!(op_spec, Some((OpAssoc::Right, 3)));
+        assert_eq!(name, "sub");
+        assert!(matches!(expr.0, SyntaxExpr::Fn(..)));
+    }
+
+    #[test]
+    fn test_repl_item_accepts_ordinary_expressions_and_lets_with_bodies() {
+        for (src, expected) in [
+            ("42", atom(Expr::Lit(Value::Int(42)))),
+            (
+                "let x = 42\nx",
+                spanned(SyntaxExpr::Let(
+                    None,
+                    "x",
+                    Box::new(atom(Expr::Lit(Value::Int(42)))),
+                    Box::new(atom(Expr::Var("x"))),
+                )),
+            ),
+        ] {
+            let item = parse_repl_item(src).unwrap();
+            let ReplItem::Expr(expr) = item else {
+                panic!("Expected expression, got {item:?}");
+            };
+            assert!(expr.spanless_eq(&expected));
+        }
+    }
+
+    #[test]
+    fn test_standalone_let_is_only_valid_at_the_repl_root() {
+        let src = "let x = 42";
+        assert!(matches!(parse_repl_item(src), Ok(ReplItem::Let { .. })));
+        let toks = lex::lexer().parse(src).unwrap();
+        assert!(
+            expr_parser()
+                .parse(
+                    toks.as_slice()
+                        .map((src.len()..src.len()).into(), |(t, s)| (t, s))
+                )
+                .has_errors()
+        );
+
+        for src in ["let x =", "{ let x = 42 }", "let x = 42 }"] {
+            assert!(parse_repl_item(src).is_err(), "{src}");
+        }
     }
 }

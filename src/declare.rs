@@ -91,6 +91,14 @@ mod lex {
 mod parse {
     use super::*;
 
+    pub type LetHead<'src> = (Option<(OpAssoc, i64)>, &'src str);
+
+    #[derive(Debug)]
+    pub enum ReplItem<'src> {
+        Expr(Spanned<SyntaxExpr<'src>>),
+        Let(Option<(OpAssoc, i64)>, &'src str, Spanned<SyntaxExpr<'src>>),
+    }
+
     #[derive(Debug, Clone, PartialEq)]
     pub enum SyntaxExpr<'src> {
         Atom(Expr<'src>),
@@ -273,8 +281,8 @@ mod fixity {
                             None => String::new(),
                         },
                         match rec_name {
-                            Some(n) => format!("`{n}`"),
-                            None => String::new(),
+                            Some(n) if n != &name.unwrap_or("") => format!("`{n}`"),
+                            _ => String::new(),
                         },
                         params
                             .iter()

@@ -33,6 +33,25 @@ fn extend_env<'src>(
     }
 }
 
+/// Evaluates the expression in the old environment and installs it on success.
+pub fn bind<'src>(
+    x: &'src str,
+    expr: &Spanned<Expr<'src>>,
+    env: &mut Env<'src>,
+) -> Result<(), Error> {
+    let mut v = eval(expr, env.clone())?;
+    if let Value::Closure(name, rec_name, ..) = &mut v {
+        // Only a function definition introduces a recursive binding.
+        // Other lets can name a closure without changing its scope.
+        if matches!(&expr.0, Expr::Fn(..)) {
+            *rec_name = Some(x);
+        }
+        *name = Some(x);
+    }
+    env.insert_mut(x, Rc::new(v));
+    Ok(())
+}
+
 pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'src>, Error> {
     Ok(match &expr.0 {
         Expr::Err => unreachable!(), // Valid AST does not contain Expr::Err
@@ -151,20 +170,8 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
             }
         },
         Expr::Let(_, x, e, body) => {
-            let mut v = eval(e, env.clone())?;
-
-            if let Value::Closure(name, rec_name, ..) = &mut v {
-                // Only a function definition introduces a recursive binding.
-                // Other lets can name a closure without changing its scope.
-                if matches!(&e.0, Expr::Fn(..)) {
-                    *rec_name = Some(x);
-                }
-                *name = Some(x);
-            }
-
             let mut new_env = env;
-            new_env.insert_mut(x, Rc::new(v));
-
+            bind(x, e, &mut new_env)?;
             eval(body, new_env)?
         }
         Expr::Builtin(f) => f(&expr, &env)?,
@@ -314,6 +321,14 @@ mod tests {
         let expr = spanned(Expr::Var("x"));
 
         assert_eval(expr, env, Value::Int(42));
+    }
+
+    #[test]
+    fn test_bind_preserves_previous_binding_when_expression_fails() {
+        let mut env = env_from([("x", Value::Int(42))]);
+
+        assert!(bind("x", &var("missing"), &mut env).is_err());
+        assert_eval(var("x"), env, Value::Int(42));
     }
 
     #[test]

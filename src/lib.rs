@@ -1,11 +1,12 @@
 use std::{
     fmt,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
 };
 
-use ariadne::{Color, Label, Report, ReportKind, sources};
 use chumsky::prelude::*;
+
+use crate::source::SourceMap;
 
 mod builtin;
 mod declare;
@@ -13,6 +14,8 @@ mod fixity;
 mod interp;
 mod lex;
 mod parse;
+mod repl;
+mod source;
 
 #[derive(Debug)]
 pub enum RunError {
@@ -50,6 +53,14 @@ impl std::error::Error for RunError {
     }
 }
 
+/// Runs the REPL on standard input, showing prompts only on a terminal.
+pub fn run_repl() -> io::Result<()> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let show_prompt = stdin.is_terminal() && stdout.is_terminal();
+    repl::run(stdin.lock(), stdout, io::stderr(), show_prompt)
+}
+
 /// Runs a source file, printing its returned value or diagnostics.
 ///
 /// Returns an error if reading, lexing, parsing, evaluation, or output fails.
@@ -61,37 +72,27 @@ pub fn run(filename: impl AsRef<Path>) -> Result<(), RunError> {
         filename: filename.to_path_buf(),
         error,
     })?;
-    let filename = filename.to_string_lossy().into_owned();
-
-    let (toks, lex_errs) = lex::lexer().parse(src.as_str()).into_output_errors();
-
-    if !lex_errs.is_empty() {
-        print_errs(
-            filename,
-            &src,
-            lex_errs
-                .into_iter()
-                .map(|e| e.map_token(|tok| tok.to_string())),
-        )
-        .map_err(RunError::Output)?;
-        return Err(RunError::Lex);
-    }
-    let toks = toks.ok_or(RunError::Lex)?;
-
-    let eoi = (src.len()..src.len()).into();
+    let arena = typed_arena::Arena::new();
+    let mut sources = SourceMap::new(&arena);
+    let source = sources.add(filename.to_string_lossy().into_owned(), src);
+    let toks = match source.lex() {
+        Ok(toks) => toks,
+        Err(errors) => {
+            sources
+                .write_diagnostics(errors, io::stderr().lock())
+                .map_err(RunError::Output)?;
+            return Err(RunError::Lex);
+        }
+    };
+    let eoi = source.eof();
     let (syntax, parse_errs) = parse::expr_parser()
         .parse(toks.as_slice().map(eoi, |(t, s)| (t, s)))
         .into_output_errors();
 
     if !parse_errs.is_empty() {
-        print_errs(
-            filename,
-            &src,
-            parse_errs
-                .into_iter()
-                .map(|e| e.map_token(|tok| tok.to_string())),
-        )
-        .map_err(RunError::Output)?;
+        sources
+            .write_diagnostics(parse_errs.into_iter().map(Into::into), io::stderr().lock())
+            .map_err(RunError::Output)?;
         return Err(RunError::Parse);
     }
 
@@ -100,33 +101,10 @@ pub fn run(filename: impl AsRef<Path>) -> Result<(), RunError> {
     match interp::eval(&expr, builtin::env()) {
         Ok(v) => writeln!(io::stdout().lock(), "Returned: {v}").map_err(RunError::Output),
         Err(e) => {
-            print_errs(filename, &src, [Rich::custom(e.span, e.msg)]).map_err(RunError::Output)?;
+            sources
+                .write_diagnostics([e.into()], io::stderr().lock())
+                .map_err(RunError::Output)?;
             Err(RunError::Runtime)
         }
     }
-}
-
-fn print_errs<'src>(
-    filename: String,
-    src: &'src str,
-    errs: impl IntoIterator<Item = Rich<'src, String>>,
-) -> io::Result<()> {
-    for e in errs {
-        Report::build(ReportKind::Error, (filename.clone(), e.span().into_range()))
-            .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
-            .with_message(e.to_string())
-            .with_label(
-                Label::new((filename.clone(), e.span().into_range()))
-                    .with_message(e.reason().to_string())
-                    .with_color(Color::Red),
-            )
-            .with_labels(e.contexts().map(|(label, span)| {
-                Label::new((filename.clone(), span.into_range()))
-                    .with_message(format!("while parsing this {label}"))
-                    .with_color(Color::Yellow)
-            }))
-            .finish()
-            .eprint(sources([(filename.clone(), src)]))?;
-    }
-    Ok(())
 }

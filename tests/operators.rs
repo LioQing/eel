@@ -251,7 +251,7 @@ fn test_plain_bindings_shadow_operator_fixity() {
 }
 
 #[test]
-fn test_initializers_use_previous_binding_fixity() {
+fn test_expressions_use_previous_binding_fixity() {
     for (src, expected) in [
         (
             "let opr 1 sub = fn(a, b) { a - b }

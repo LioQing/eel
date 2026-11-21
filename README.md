@@ -208,6 +208,42 @@ int main() {
 
 ## Usage
 
+Run a file by passing its path:
+
 ```bash
 cargo run -- <path-to-file>
 ```
+
+Start the interactive interpreter (REPL) without a path:
+
+```bash
+cargo run
+```
+
+The REPL prints expression results and saves the last successful result as `it`.
+Use `let` to define a name for the rest of the session. Unlike a `let` in a file,
+a standalone REPL declaration does not need a body.
+
+```text
+eel> let x = 40
+eel> x + 2
+42
+eel> it * 2
+84
+```
+
+To enter one expression or declaration across several lines, put `:{` and `:}` on
+their own lines:
+
+```text
+eel> :{
+eel| let double = fn(n) {
+eel|     n * 2
+eel| }
+eel| :}
+eel> double(21).
+42
+```
+
+Type `:help` for commands, or `:quit` (`:q`) to exit. End of input exits as well.
+When input is piped in, the REPL evaluates it without printing prompts.

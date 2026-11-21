@@ -3,10 +3,9 @@ mod common;
 use common::{SourceFile, assert_failure, assert_source_diagnostic, assert_success, cli};
 
 #[test]
-fn test_missing_file_argument_fails_without_panicking() {
+fn test_no_file_argument_exits_cleanly_on_eof() {
     let output = cli().output().unwrap();
-    assert_failure(&output, "Expected file argument");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
+    assert_success(&output, "", "");
 }
 
 #[test]

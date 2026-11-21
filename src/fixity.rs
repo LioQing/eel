@@ -41,6 +41,27 @@ fn shadow_patt<'src>(patt: &Patt<'src>, specs: &mut Vec<OpSpec<'src>>) {
     }
 }
 
+/// Resolves the expression and returns the fixities in scope after the binding.
+pub fn resolve_binding<'src>(
+    name: &'src str,
+    spec: Option<(OpAssoc, i64)>,
+    expr: Spanned<SyntaxExpr<'src>>,
+    specs: &[OpSpec<'src>],
+) -> (Spanned<Expr<'src>>, Vec<OpSpec<'src>>) {
+    let mut scoped_specs = specs.to_vec();
+    let (assoc, prec) = spec.unwrap_or_default();
+    scoped_specs.push((name, assoc, prec));
+
+    // Only a function definition sees the new binding from its expression.
+    let expr_specs = if matches!(&expr.0, SyntaxExpr::Fn(..)) {
+        scoped_specs.as_slice()
+    } else {
+        specs
+    };
+
+    (resolve(expr, expr_specs), scoped_specs)
+}
+
 pub fn resolve<'src>(
     (expr, span): Spanned<SyntaxExpr<'src>>,
     specs: &[OpSpec<'src>],
@@ -93,20 +114,11 @@ pub fn resolve<'src>(
             return (operands.pop().unwrap().0, span);
         }
         SyntaxExpr::Let(spec, name, assign, body) => {
-            let mut scoped_specs = specs.to_vec();
-            let (assoc, prec) = spec.unwrap_or((OpAssoc::Left, 0));
-            scoped_specs.push((name, assoc, prec));
-            // A function binding is recursive, but an ordinary initializer still sees
-            // the previous binding, just as it does during evaluation.
-            let assign_specs = if matches!(&assign.0, SyntaxExpr::Fn(..)) {
-                scoped_specs.as_slice()
-            } else {
-                specs
-            };
+            let (assign, scoped_specs) = resolve_binding(name, spec, *assign, specs);
             Expr::Let(
                 spec,
                 name,
-                Box::new(resolve(*assign, assign_specs)),
+                Box::new(assign),
                 Box::new(resolve(*body, &scoped_specs)),
             )
         }
@@ -931,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn test_initializers_use_previous_binding_fixity() {
+    fn test_expressions_use_previous_binding_fixity() {
         let left = Some((OpAssoc::Left, 1));
         let right = Some((OpAssoc::Right, 1));
         for (old, new, expected) in [

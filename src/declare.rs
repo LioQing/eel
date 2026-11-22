@@ -98,6 +98,43 @@ mod lex {
 mod parse {
     use super::*;
 
+    fn fmt_fixity(f: &mut fmt::Formatter<'_>, fixity: Option<(OpAssoc, i64)>) -> fmt::Result {
+        match fixity {
+            Some((OpAssoc::Left, prec)) => write!(f, " opl {prec}"),
+            Some((OpAssoc::Right, prec)) => write!(f, " opr {prec}"),
+            None => Ok(()),
+        }
+    }
+
+    fn fmt_let(
+        f: &mut fmt::Formatter<'_>,
+        fixity: Option<(OpAssoc, i64)>,
+        name: &str,
+        assign: &SyntaxExpr<'_>,
+    ) -> fmt::Result {
+        write!(f, "let")?;
+        fmt_fixity(f, fixity)?;
+        write!(f, " {name} = {assign}")
+    }
+
+    fn fmt_let_rec<'src>(
+        f: &mut fmt::Formatter<'_>,
+        bindings: &[RecFn<'src, Spanned<SyntaxExpr<'src>>>],
+    ) -> fmt::Result {
+        write!(f, "let {{")?;
+        for binding in bindings {
+            fmt_fixity(f, binding.fixity)?;
+            write!(
+                f,
+                " {} = fn({}) {{ {} }}",
+                binding.name.0,
+                binding.params.0.join(", "),
+                binding.body.0,
+            )?;
+        }
+        write!(f, " }}")
+    }
+
     #[derive(Debug, Clone, PartialEq)]
     pub struct RecFn<'src, Body> {
         pub name: Spanned<&'src str>,
@@ -120,6 +157,29 @@ mod parse {
         Expr(Spanned<SyntaxExpr<'src>>),
         Let(Option<(OpAssoc, i64)>, &'src str, Spanned<SyntaxExpr<'src>>),
         LetRec(Vec<RecFn<'src, Spanned<SyntaxExpr<'src>>>>),
+    }
+
+    impl fmt::Display for ReplItem<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Expr(expr) => write!(f, "{}", expr.0),
+                Self::Let(fixity, name, assign) => fmt_let(f, *fixity, name, &assign.0),
+                Self::LetRec(bindings) => fmt_let_rec(f, bindings),
+            }
+        }
+    }
+
+    impl SpanlessPartialEq for ReplItem<'_> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            match (self, other) {
+                (Self::Expr(l), Self::Expr(r)) => l.spanless_eq(r),
+                (Self::Let(l_spec, l_name, l_assign), Self::Let(r_spec, r_name, r_assign)) => {
+                    l_spec == r_spec && l_name == r_name && l_assign.spanless_eq(r_assign)
+                }
+                (Self::LetRec(l), Self::LetRec(r)) => l.spanless_eq(r),
+                _ => false,
+            }
+        }
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -188,36 +248,12 @@ mod parse {
                     write!(f, "({result})")
                 }
                 SyntaxExpr::Let(op_spec, ident, assign, body) => {
-                    write!(
-                        f,
-                        "let{} {} = {} {}",
-                        match op_spec {
-                            Some((OpAssoc::Left, prec)) => format!(" opl {prec}"),
-                            Some((OpAssoc::Right, prec)) => format!(" opr {prec}"),
-                            None => "".to_string(),
-                        },
-                        ident,
-                        assign.0,
-                        body.0
-                    )
+                    fmt_let(f, *op_spec, ident, &assign.0)?;
+                    write!(f, " {}", body.0)
                 }
                 SyntaxExpr::LetRec(bindings, body) => {
-                    write!(f, "let {{")?;
-                    for binding in bindings {
-                        match binding.fixity {
-                            Some((OpAssoc::Left, prec)) => write!(f, " opl {prec}")?,
-                            Some((OpAssoc::Right, prec)) => write!(f, " opr {prec}")?,
-                            None => {}
-                        }
-                        write!(
-                            f,
-                            " {} = fn({}) {{ {} }}",
-                            binding.name.0,
-                            binding.params.0.join(", "),
-                            binding.body.0,
-                        )?;
-                    }
-                    write!(f, " }} {}", body.0)
+                    fmt_let_rec(f, bindings)?;
+                    write!(f, " {}", body.0)
                 }
             }
         }

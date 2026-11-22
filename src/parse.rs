@@ -43,170 +43,167 @@ pub fn expr_and_item_parsers<
         .map(|(fixity, (name, _))| (fixity, name));
 
     let mut let_rec_head = Recursive::declare();
-    let expr = recursive(|expr| {
-        let mut inline = Recursive::declare();
-        let mut op = Recursive::declare();
+    let mut expr = Recursive::declare();
+    let mut inline = Recursive::declare();
+    let mut op = Recursive::declare();
 
-        let block = expr
-            .clone()
-            .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
-            .recover_with(via_parser(nested_delimiters(
-                Token::OpenBrace,
-                Token::CloseBrace,
-                [(Token::OpenParen, Token::CloseParen)],
-                |span| (SyntaxExpr::Atom(Expr::Err), span),
-            )))
-            .labelled("block expression");
+    let block = expr
+        .clone()
+        .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
+        .recover_with(via_parser(nested_delimiters(
+            Token::OpenBrace,
+            Token::CloseBrace,
+            [(Token::OpenParen, Token::CloseParen)],
+            |span| (SyntaxExpr::Atom(Expr::Err), span),
+        )))
+        .labelled("block expression");
 
-        let paren = op
-            .clone()
-            .or(inline.clone())
-            .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-            .recover_with(via_parser(nested_delimiters(
-                Token::OpenParen,
-                Token::CloseParen,
-                [(Token::OpenBrace, Token::CloseBrace)],
-                |span| (SyntaxExpr::Atom(Expr::Err), span),
-            )))
-            .labelled("parenthesized expression");
+    let paren = op
+        .clone()
+        .or(inline.clone())
+        .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
+        .recover_with(via_parser(nested_delimiters(
+            Token::OpenParen,
+            Token::CloseParen,
+            [(Token::OpenBrace, Token::CloseBrace)],
+            |span| (SyntaxExpr::Atom(Expr::Err), span),
+        )))
+        .labelled("parenthesized expression");
 
-        let atom = choice((lit, var))
-            .map_with(|expr, e| (expr, e.span()))
-            .or(choice((block, paren)));
+    let atom = choice((lit, var))
+        .map_with(|expr, e| (expr, e.span()))
+        .or(choice((block, paren)));
 
-        let call = atom
-            .clone()
-            .foldl_with(
-                op.clone()
-                    .or(inline.clone())
+    let call = atom
+        .clone()
+        .foldl_with(
+            op.clone()
+                .or(inline.clone())
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
+                .or(just(Token::Dot).map(|_| vec![]))
+                .map_with(|args, e| (args, e.span()))
+                .repeated(),
+            |f, args, e| (SyntaxExpr::Call(Box::new(f), args), e.span()),
+        )
+        .labelled("call expression");
+
+    let fn_parts = just(Token::Fn)
+        .ignore_then(
+            ident
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
+                .map_with(|params, e| (params, e.span())),
+        )
+        .then(inline.clone())
+        .labelled("function expression");
+
+    let r#fn = fn_parts
+        .clone()
+        .map_with(|(params, body), e| (SyntaxExpr::Fn(params, Box::new(body)), e.span()));
+
+    let patt = recursive(|case_patt| {
+        let r#struct = ident
+            .then(
+                case_patt
+                    .clone()
                     .separated_by(just(Token::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>()
                     .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-                    .or(just(Token::Dot).map(|_| vec![]))
-                    .map_with(|args, e| (args, e.span()))
-                    .repeated(),
-                |f, args, e| (SyntaxExpr::Call(Box::new(f), args), e.span()),
+                    .map_with(|patt, e| (patt, e.span())),
             )
-            .labelled("call expression");
+            .map(|(name, args)| Patt::Struct(name, args))
+            .labelled("struct pattern");
+        let var = ident.map(Patt::Var).labelled("variable pattern");
+        let lit = value.map(Patt::Lit).labelled("literal pattern");
 
-        let fn_parts = just(Token::Fn)
-            .ignore_then(
-                ident
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-                    .map_with(|params, e| (params, e.span())),
-            )
-            .then(inline.clone())
-            .labelled("function expression");
+        choice((r#struct, var, lit))
+            .map_with(|patt, e| (patt, e.span()))
+            .labelled("pattern")
+    });
 
-        let r#fn = fn_parts
+    let case_arm = patt
+        .then_ignore(just(Token::PattArm))
+        .then(inline.clone())
+        .map(|(patt, body)| (patt, Box::new(body)))
+        .labelled("case expression arm");
+
+    let case = just(Token::Case)
+        .ignore_then(inline.clone())
+        .then(
+            case_arm
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
+                .map_with(|arms, e| (arms, e.span())),
+        )
+        .map_with(|(expr, arms), e| (SyntaxExpr::Case(Box::new(expr), arms), e.span()))
+        .labelled("case expression");
+
+    inline.define(choice((call, r#fn, case)));
+
+    op.define(
+        inline
             .clone()
-            .map_with(|(params, body), e| (SyntaxExpr::Fn(params, Box::new(body)), e.span()));
+            .then(atom.then(inline.clone()).repeated().at_least(1).collect())
+            .map_with(|(first, rest), e| (SyntaxExpr::Ops(Box::new(first), rest), e.span())),
+    );
 
-        let patt = recursive(|case_patt| {
-            let r#struct = ident
-                .then(
-                    case_patt
-                        .clone()
-                        .separated_by(just(Token::Comma))
-                        .allow_trailing()
-                        .collect::<Vec<_>>()
-                        .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-                        .map_with(|patt, e| (patt, e.span())),
-                )
-                .map(|(name, args)| Patt::Struct(name, args))
-                .labelled("struct pattern");
-            let var = ident.map(Patt::Var).labelled("variable pattern");
-            let lit = value.map(Patt::Lit).labelled("literal pattern");
+    let r#let = let_head
+        .clone()
+        .then(inline.clone())
+        .then(expr.clone())
+        .map(|(((op_spec, x), assign), body)| {
+            SyntaxExpr::Let(op_spec, x, Box::new(assign), Box::new(body))
+        })
+        .map_with(|expr, e| (expr, e.span()))
+        .labelled("let expression");
 
-            choice((r#struct, var, lit))
-                .map_with(|patt, e| (patt, e.span()))
-                .labelled("pattern")
+    let rec_fn = binding_head
+        .then(fn_parts)
+        .map(|((fixity, name), (params, body))| RecFn {
+            name,
+            fixity,
+            params,
+            body,
         });
 
-        let case_arm = patt
-            .then_ignore(just(Token::PattArm))
-            .then(inline.clone())
-            .map(|(patt, body)| (patt, Box::new(body)))
-            .labelled("case expression arm");
-
-        let case = just(Token::Case)
-            .ignore_then(inline.clone())
-            .then(
-                case_arm
-                    .repeated()
-                    .at_least(1)
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
-                    .map_with(|arms, e| (arms, e.span())),
-            )
-            .map_with(|(expr, arms), e| (SyntaxExpr::Case(Box::new(expr), arms), e.span()))
-            .labelled("case expression");
-
-        inline.define(choice((call, r#fn, case)));
-
-        op.define(
-            inline
-                .clone()
-                .then(atom.then(inline.clone()).repeated().at_least(1).collect())
-                .map_with(|(first, rest), e| (SyntaxExpr::Ops(Box::new(first), rest), e.span())),
-        );
-
-        let r#let = let_head
-            .clone()
-            .then(inline.clone())
-            .then(expr.clone())
-            .map(|(((op_spec, x), assign), body)| {
-                SyntaxExpr::Let(op_spec, x, Box::new(assign), Box::new(body))
-            })
-            .map_with(|expr, e| (expr, e.span()))
-            .labelled("let expression");
-
-        let rec_fn = binding_head
-            .then(fn_parts)
-            .map(|((fixity, name), (params, body))| RecFn {
-                name,
-                fixity,
-                params,
-                body,
-            });
-
-        let_rec_head.define(
-            just(Token::Let).ignore_then(
-                rec_fn
-                    .repeated()
-                    .at_least(1)
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
-                    .validate(|bindings, _, emitter| {
-                        let mut names = HashSet::new();
-                        for binding in &bindings {
-                            let (name, span) = binding.name;
-                            if !names.insert(name) {
-                                emitter.emit(Rich::custom(
-                                    span,
-                                    format!("Duplicate name `{name}` in recursive let group"),
-                                ));
-                            }
+    let_rec_head.define(
+        just(Token::Let).ignore_then(
+            rec_fn
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
+                .validate(|bindings, _, emitter| {
+                    let mut names = HashSet::new();
+                    for binding in &bindings {
+                        let (name, span) = binding.name;
+                        if !names.insert(name) {
+                            emitter.emit(Rich::custom(
+                                span,
+                                format!("Duplicate name `{name}` in recursive let group"),
+                            ));
                         }
-                        bindings
-                    }),
-            ),
-        );
+                    }
+                    bindings
+                }),
+        ),
+    );
 
-        let let_rec = let_rec_head
-            .clone()
-            .then(expr)
-            .map_with(|(bindings, body), e| {
-                (SyntaxExpr::LetRec(bindings, Box::new(body)), e.span())
-            })
-            .labelled("recursive let expression");
+    let let_rec = let_rec_head
+        .clone()
+        .then(expr.clone())
+        .map_with(|(bindings, body), e| (SyntaxExpr::LetRec(bindings, Box::new(body)), e.span()))
+        .labelled("recursive let expression");
 
-        choice((op, inline, r#let, let_rec)).labelled("expression")
-    });
+    expr.define(choice((op, inline, r#let, let_rec)).labelled("expression"));
 
     let let_item = let_head
         .then(expr.clone())
@@ -861,18 +858,18 @@ mod tests {
     #[test]
     fn test_repl_item_accepts_standalone_let_with_infix_expr() {
         let item = parse_repl_item("let x = 2 + 3 * 4").unwrap();
-        let ReplItem::Let(op_spec, name, expr) = item else {
-            panic!("Expected declaration, got {item:?}");
-        };
-        assert_eq!(op_spec, None);
-        assert_eq!(name, "x");
-        assert!(expr.spanless_eq(&ops(
-            atom(Expr::Lit(Value::Int(2))),
-            vec![
-                ("+", atom(Expr::Lit(Value::Int(3)))),
-                ("*", atom(Expr::Lit(Value::Int(4))))
-            ],
-        )));
+        let expected = ReplItem::Let(
+            None,
+            "x",
+            ops(
+                atom(Expr::Lit(Value::Int(2))),
+                vec![
+                    ("+", atom(Expr::Lit(Value::Int(3)))),
+                    ("*", atom(Expr::Lit(Value::Int(4)))),
+                ],
+            ),
+        );
+        assert!(item.spanless_eq(&expected), "{item:?}");
     }
 
     #[test]
@@ -918,10 +915,45 @@ mod tests {
             ),
         ] {
             let item = parse_repl_item(src).unwrap();
-            let ReplItem::Expr(expr) = item else {
-                panic!("Expected expression, got {item:?}");
-            };
-            assert!(expr.spanless_eq(&expected));
+            assert!(item.spanless_eq(&ReplItem::Expr(expected)), "{item:?}");
+        }
+    }
+
+    #[test]
+    fn test_repl_item_display() {
+        for (src, expected) in [
+            ("1 + 2", "(1 + 2)"),
+            ("let  x = 42", "let x = 42"),
+            (
+                "let opr 3 sub = fn(a,b){a - b}",
+                "let opr 3 sub = fn(a, b) {(a - b)}",
+            ),
+            (
+                "let {f = fn(){42} opl 2 g = fn(x){x}}",
+                "let { f = fn() { 42 } opl 2 g = fn(x) { x } }",
+            ),
+        ] {
+            assert_eq!(parse_repl_item(src).unwrap().to_string(), expected, "{src}");
+        }
+    }
+
+    #[test]
+    fn test_repl_item_spanless_eq_preserves_structure() {
+        let src = "let { f = fn(x) x opl 2 g = fn() f(42) }";
+        let shifted = format!("  {src}");
+        let item = parse_repl_item(src).unwrap();
+        assert!(item.spanless_eq(&parse_repl_item(&shifted).unwrap()));
+
+        for different in [
+            "let { f = fn(x) x opr 2 g = fn() f(42) }",
+            "let { f = fn(x) x opl 2 g = fn() f(43) }",
+            "let { opl 2 g = fn() f(42) f = fn(x) x }",
+            "let { f = fn(x) x opl 2 g = fn() f(42) } g.",
+        ] {
+            assert!(
+                !item.spanless_eq(&parse_repl_item(different).unwrap()),
+                "{different}"
+            );
         }
     }
 

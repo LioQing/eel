@@ -2,41 +2,51 @@ use std::rc::Rc;
 
 use crate::declare::*;
 
-fn op_spec(op: &Spanned<Expr<'_>>, specs: &[OpSpec<'_>]) -> (OpAssoc, i64) {
-    if let Expr::Var(name) = &op.0 {
-        if let Some((_, assoc, prec)) = specs.iter().rev().find(|(x, _, _)| x == name) {
-            return (*assoc, *prec);
+fn op_fixity(op: &Spanned<Expr<'_>>, specs: &[OpSpec<'_>]) -> Fixity {
+    if let Expr::Var(name) = &op.value {
+        if let Some(spec) = specs.iter().rev().find(|spec| spec.name == *name) {
+            return spec.fixity;
         }
 
-        let prec = match *name {
+        let precedence = match *name {
             "==" | "!=" => 1,
             "<" | "<=" | ">" | ">=" => 2,
             "+" | "-" => 3,
             "*" | "/" | "%" => 4,
             _ => 0,
         };
-        (OpAssoc::Left, prec)
+        Fixity {
+            assoc: OpAssoc::Left,
+            precedence,
+        }
     } else {
-        (OpAssoc::Left, 0)
+        Fixity::default()
     }
 }
 
 fn reduce_op<'src>(operands: &mut Vec<Spanned<Expr<'src>>>, op: Spanned<Expr<'src>>) {
-    let right = operands.pop().unwrap();
-    let left = operands.pop().unwrap();
-    let span = (left.1.start..right.1.end).into();
-    operands.push((
-        Expr::Op(Box::new(left), Box::new(op), Box::new(right)),
+    let rhs = operands.pop().unwrap();
+    let lhs = operands.pop().unwrap();
+    let span = lhs.span.start..rhs.span.end;
+    operands.push(Spanned::new(
+        Expr::Op(Op {
+            lhs: Box::new(lhs),
+            op: Box::new(op),
+            rhs: Box::new(rhs),
+        }),
         span,
     ));
 }
 
 fn shadow_patt<'src>(patt: &Patt<'src>, specs: &mut Vec<OpSpec<'src>>) {
     match patt {
-        Patt::Var(name) => specs.push((name, OpAssoc::Left, 0)),
-        Patt::Struct(_, args) => {
-            for (patt, _) in &args.0 {
-                shadow_patt(patt, specs);
+        Patt::Var(name) => specs.push(OpSpec {
+            name,
+            fixity: Fixity::default(),
+        }),
+        Patt::Struct(StructPatt { args, .. }) => {
+            for patt in &args.value {
+                shadow_patt(&patt.value, specs);
             }
         }
         Patt::Lit(_) => {}
@@ -49,23 +59,28 @@ fn resolve_fn_body<'src>(
     specs: &[OpSpec<'src>],
 ) -> Rc<Spanned<Expr<'src>>> {
     let mut scoped_specs = specs.to_vec();
-    scoped_specs.extend(params.iter().map(|name| (*name, OpAssoc::Left, 0)));
+    scoped_specs.extend(params.iter().map(|name| OpSpec {
+        name,
+        fixity: Fixity::default(),
+    }));
     Rc::new(resolve(body, &scoped_specs))
 }
 
 /// Resolves the expression and returns the fixities in scope after the binding.
 pub fn resolve_let<'src>(
     name: &'src str,
-    spec: Option<(OpAssoc, i64)>,
+    fixity: Option<Fixity>,
     expr: Spanned<SyntaxExpr<'src>>,
     specs: &[OpSpec<'src>],
 ) -> (Spanned<Expr<'src>>, Vec<OpSpec<'src>>) {
     let mut scoped_specs = specs.to_vec();
-    let (assoc, prec) = spec.unwrap_or_default();
-    scoped_specs.push((name, assoc, prec));
+    scoped_specs.push(OpSpec {
+        name,
+        fixity: fixity.unwrap_or_default(),
+    });
 
     // Only a function definition sees the new binding from its expression.
-    let expr_specs = if matches!(&expr.0, SyntaxExpr::Fn(..)) {
+    let expr_specs = if matches!(&expr.value, SyntaxExpr::Fn(_)) {
         scoped_specs.as_slice()
     } else {
         specs
@@ -80,9 +95,9 @@ pub fn resolve_let_rec<'src>(
     specs: &[OpSpec<'src>],
 ) -> (Vec<RecFn<'src, Rc<Spanned<Expr<'src>>>>>, Vec<OpSpec<'src>>) {
     let mut scoped_specs = specs.to_vec();
-    scoped_specs.extend(members.iter().map(|member| {
-        let (assoc, prec) = member.fixity.unwrap_or_default();
-        (member.name.0, assoc, prec)
+    scoped_specs.extend(members.iter().map(|member| OpSpec {
+        name: member.name.value,
+        fixity: member.fixity.unwrap_or_default(),
     }));
 
     let members = members
@@ -90,7 +105,7 @@ pub fn resolve_let_rec<'src>(
         .map(|member| RecFn {
             name: member.name,
             fixity: member.fixity,
-            body: resolve_fn_body(&member.params.0, member.body, &scoped_specs),
+            body: resolve_fn_body(&member.params.value, member.body, &scoped_specs),
             params: member.params,
         })
         .collect();
@@ -99,76 +114,81 @@ pub fn resolve_let_rec<'src>(
 }
 
 pub fn resolve<'src>(
-    (expr, span): Spanned<SyntaxExpr<'src>>,
+    Spanned { value: expr, span }: Spanned<SyntaxExpr<'src>>,
     specs: &[OpSpec<'src>],
 ) -> Spanned<Expr<'src>> {
     let expr = match expr {
         SyntaxExpr::Atom(expr) => expr,
-        SyntaxExpr::Call(func, (args, args_span)) => Expr::Call(
-            Box::new(resolve(*func, specs)),
-            (
-                args.into_iter().map(|arg| resolve(arg, specs)).collect(),
-                args_span,
-            ),
-        ),
-        SyntaxExpr::Fn(params, body) => {
-            let body = resolve_fn_body(&params.0, *body, specs);
-            Expr::Fn(params, body)
+        SyntaxExpr::Call(Call { callee, args }) => Expr::Call(Call {
+            callee: Box::new(resolve(*callee, specs)),
+            args: args.map(|args| args.into_iter().map(|arg| resolve(arg, specs)).collect()),
+        }),
+        SyntaxExpr::Fn(FnExpr { params, body }) => {
+            let body = resolve_fn_body(&params.value, *body, specs);
+            Expr::Fn(FnExpr { params, body })
         }
-        SyntaxExpr::Case(expr, (arms, arms_span)) => Expr::Case(
-            Box::new(resolve(*expr, specs)),
-            (
+        SyntaxExpr::Case(Case { scrutinee, arms }) => Expr::Case(Case {
+            scrutinee: Box::new(resolve(*scrutinee, specs)),
+            arms: arms.map(|arms| {
                 arms.into_iter()
-                    .map(|(patt, body)| {
+                    .map(|CaseArm { patt, body }| {
                         let mut scoped_specs = specs.to_vec();
-                        shadow_patt(&patt.0, &mut scoped_specs);
-                        (patt, Box::new(resolve(*body, &scoped_specs)))
+                        shadow_patt(&patt.value, &mut scoped_specs);
+                        CaseArm {
+                            patt,
+                            body: Box::new(resolve(*body, &scoped_specs)),
+                        }
                     })
-                    .collect(),
-                arms_span,
-            ),
-        ),
-        SyntaxExpr::Ops(first, rest) => {
+                    .collect()
+            }),
+        }),
+        SyntaxExpr::Ops(Ops { first, rest }) => {
             let mut operands = vec![resolve(*first, specs)];
             let mut operators = Vec::new();
-            for (op, right) in rest {
+            for OpStep { op, rhs } in rest {
                 let op = resolve(op, specs);
-                let (assoc, prec) = op_spec(&op, specs);
+                let Fixity { assoc, precedence } = op_fixity(&op, specs);
                 while operators.last().is_some_and(|prev| {
-                    let (_, prev_prec) = op_spec(prev, specs);
-                    prev_prec > prec || (prev_prec == prec && assoc == OpAssoc::Left)
+                    let prev_prec = op_fixity(prev, specs).precedence;
+                    prev_prec > precedence || (prev_prec == precedence && assoc == OpAssoc::Left)
                 }) {
                     reduce_op(&mut operands, operators.pop().unwrap());
                 }
                 operators.push(op);
-                operands.push(resolve(right, specs));
+                operands.push(resolve(rhs, specs));
             }
             while let Some(op) = operators.pop() {
                 reduce_op(&mut operands, op);
             }
-            return (operands.pop().unwrap().0, span);
+            operands.pop().unwrap().value
         }
-        SyntaxExpr::Let(spec, name, assign, body) => {
-            let (assign, scoped_specs) = resolve_let(name, spec, *assign, specs);
-            Expr::Let(
-                spec,
+        SyntaxExpr::Let(Let {
+            fixity,
+            name,
+            init,
+            body,
+        }) => {
+            let (init, scoped_specs) = resolve_let(name, fixity, *init, specs);
+            Expr::Let(Let {
+                fixity,
                 name,
-                Box::new(assign),
-                Box::new(resolve(*body, &scoped_specs)),
-            )
+                init: Box::new(init),
+                body: Box::new(resolve(*body, &scoped_specs)),
+            })
         }
-        SyntaxExpr::LetRec(members, body) => {
-            let (members, scoped_specs) = resolve_let_rec(members, specs);
-            Expr::LetRec(members, Box::new(resolve(*body, &scoped_specs)))
+        SyntaxExpr::LetRec(LetRec { bindings, body }) => {
+            let (bindings, scoped_specs) = resolve_let_rec(bindings, specs);
+            Expr::LetRec(LetRec {
+                bindings,
+                body: Box::new(resolve(*body, &scoped_specs)),
+            })
         }
     };
-    (expr, span)
+    Spanned::new(expr, span)
 }
 
 #[cfg(test)]
 mod tests {
-    use chumsky::span::Span;
-
     use super::*;
 
     fn spanned<T: Clone>(value: T) -> Spanned<T> {
@@ -188,45 +208,70 @@ mod tests {
         name: &'src str,
         right: Spanned<Expr<'src>>,
     ) -> Spanned<Expr<'src>> {
-        spanned(Expr::Op(
-            Box::new(left),
-            Box::new(var(name)),
-            Box::new(right),
-        ))
+        spanned(Expr::Op(Op {
+            lhs: Box::new(left),
+            op: Box::new(var(name)),
+            rhs: Box::new(right),
+        }))
+    }
+
+    fn declared(assoc: OpAssoc, precedence: i64) -> Option<Fixity> {
+        Some(Fixity { assoc, precedence })
+    }
+
+    fn spec(name: &str, assoc: OpAssoc, precedence: i64) -> OpSpec<'_> {
+        OpSpec {
+            name,
+            fixity: Fixity { assoc, precedence },
+        }
     }
 
     fn binding<'src>(
-        spec: Option<(OpAssoc, i64)>,
+        fixity: Option<Fixity>,
         name: &'src str,
         assign: Spanned<Expr<'src>>,
         body: Spanned<Expr<'src>>,
     ) -> Spanned<Expr<'src>> {
-        spanned(Expr::Let(spec, name, Box::new(assign), Box::new(body)))
+        spanned(Expr::Let(Let {
+            fixity,
+            name,
+            init: Box::new(assign),
+            body: Box::new(body),
+        }))
     }
 
     fn function<'src>(params: Vec<&'src str>, body: Spanned<Expr<'src>>) -> Spanned<Expr<'src>> {
-        spanned(Expr::Fn(spanned(params), Rc::new(body)))
+        spanned(Expr::Fn(FnExpr {
+            params: spanned(params),
+            body: Rc::new(body),
+        }))
     }
 
     fn call<'src>(
         func: Spanned<Expr<'src>>,
         args: Vec<Spanned<Expr<'src>>>,
     ) -> Spanned<Expr<'src>> {
-        spanned(Expr::Call(Box::new(func), spanned(args)))
+        spanned(Expr::Call(Call {
+            callee: Box::new(func),
+            args: spanned(args),
+        }))
     }
 
     fn case<'src>(
         value: Spanned<Expr<'src>>,
         arms: Vec<(Spanned<Patt<'src>>, Spanned<Expr<'src>>)>,
     ) -> Spanned<Expr<'src>> {
-        spanned(Expr::Case(
-            Box::new(value),
-            spanned(
+        spanned(Expr::Case(Case {
+            scrutinee: Box::new(value),
+            arms: spanned(
                 arms.into_iter()
-                    .map(|(patt, body)| (patt, Box::new(body)))
+                    .map(|(patt, body)| CaseArm {
+                        patt,
+                        body: Box::new(body),
+                    })
                     .collect(),
             ),
-        ))
+        }))
     }
 
     fn syntax_int<'src>(value: i64) -> Spanned<SyntaxExpr<'src>> {
@@ -241,58 +286,102 @@ mod tests {
         first: Spanned<SyntaxExpr<'src>>,
         rest: Vec<(&'src str, Spanned<SyntaxExpr<'src>>)>,
     ) -> Spanned<SyntaxExpr<'src>> {
-        spanned(SyntaxExpr::Ops(
-            Box::new(first),
-            rest.into_iter()
-                .map(|(op, right)| (syntax_var(op), right))
+        spanned(SyntaxExpr::Ops(Ops {
+            first: Box::new(first),
+            rest: rest
+                .into_iter()
+                .map(|(op, rhs)| OpStep {
+                    op: syntax_var(op),
+                    rhs,
+                })
                 .collect(),
-        ))
+        }))
     }
 
     fn syntax_binding<'src>(
-        spec: Option<(OpAssoc, i64)>,
+        fixity: Option<Fixity>,
         name: &'src str,
         assign: Spanned<SyntaxExpr<'src>>,
         body: Spanned<SyntaxExpr<'src>>,
     ) -> Spanned<SyntaxExpr<'src>> {
-        spanned(SyntaxExpr::Let(
-            spec,
+        spanned(SyntaxExpr::Let(Let {
+            fixity,
             name,
-            Box::new(assign),
-            Box::new(body),
-        ))
+            init: Box::new(assign),
+            body: Box::new(body),
+        }))
     }
 
     fn syntax_function<'src>(
         params: Vec<&'src str>,
         body: Spanned<SyntaxExpr<'src>>,
     ) -> Spanned<SyntaxExpr<'src>> {
-        spanned(SyntaxExpr::Fn(spanned(params), Box::new(body)))
+        spanned(SyntaxExpr::Fn(FnExpr {
+            params: spanned(params),
+            body: Box::new(body),
+        }))
     }
 
     fn syntax_call<'src>(
         func: Spanned<SyntaxExpr<'src>>,
         args: Vec<Spanned<SyntaxExpr<'src>>>,
     ) -> Spanned<SyntaxExpr<'src>> {
-        spanned(SyntaxExpr::Call(Box::new(func), spanned(args)))
+        spanned(SyntaxExpr::Call(Call {
+            callee: Box::new(func),
+            args: spanned(args),
+        }))
     }
 
     fn syntax_case<'src>(
         value: Spanned<SyntaxExpr<'src>>,
         arms: Vec<(Spanned<Patt<'src>>, Spanned<SyntaxExpr<'src>>)>,
     ) -> Spanned<SyntaxExpr<'src>> {
-        spanned(SyntaxExpr::Case(
-            Box::new(value),
-            spanned(
+        spanned(SyntaxExpr::Case(Case {
+            scrutinee: Box::new(value),
+            arms: spanned(
                 arms.into_iter()
-                    .map(|(patt, body)| (patt, Box::new(body)))
+                    .map(|(patt, body)| CaseArm {
+                        patt,
+                        body: Box::new(body),
+                    })
                     .collect(),
             ),
-        ))
+        }))
     }
 
     fn assert_resolve<'src>(syntax: Spanned<SyntaxExpr<'src>>, expected: Spanned<Expr<'src>>) {
         assert_eq!(resolve(syntax, &[]), expected);
+    }
+
+    #[test]
+    fn test_resolve_preserves_nested_call_and_case_spans() {
+        use chumsky::prelude::*;
+
+        let src = "case f(1) { x => x }";
+        let tokens = crate::lex::lexer().parse(src).unwrap();
+        let (parser, _) = crate::parse::expr_and_item_parsers();
+        let syntax = parser
+            .parse(
+                tokens
+                    .as_slice()
+                    .map((src.len()..src.len()).into(), Spanned::as_parts),
+            )
+            .unwrap();
+        let expr = resolve(syntax, &[]);
+        assert_eq!(expr.span.into_range(), 0..20);
+        let Expr::Case(Case { scrutinee, arms }) = expr.value else {
+            panic!("Expected case expression");
+        };
+        assert_eq!(scrutinee.span.into_range(), 5..9);
+        let Expr::Call(Call { callee, args }) = scrutinee.value else {
+            panic!("Expected call expression");
+        };
+        assert_eq!(callee.span.into_range(), 5..6);
+        assert_eq!(args.span.into_range(), 6..9);
+        assert_eq!(args.value[0].span.into_range(), 7..8);
+        assert_eq!(arms.span.into_range(), 10..20);
+        assert_eq!(arms.value[0].patt.span.into_range(), 12..13);
+        assert_eq!(arms.value[0].body.span.into_range(), 17..18);
     }
 
     fn syntax_int_ops<'src>(first: i64, rest: &[(&'src str, i64)]) -> Spanned<SyntaxExpr<'src>> {
@@ -471,7 +560,7 @@ mod tests {
             (OpAssoc::Right, i64::MAX),
             (OpAssoc::Left, i64::MIN),
         ] {
-            let spec = Some((assoc, prec));
+            let spec = declared(assoc, prec);
             let body = match assoc {
                 OpAssoc::Left => left_sub_chain(),
                 OpAssoc::Right => right_sub_chain(),
@@ -521,8 +610,8 @@ mod tests {
                 op(op(int(2), "add", int(3)), "mul", int(4)),
             ),
         ] {
-            let add = Some((OpAssoc::Left, add_prec));
-            let mul = Some((OpAssoc::Left, mul_prec));
+            let add = declared(OpAssoc::Left, add_prec);
+            let mul = declared(OpAssoc::Left, mul_prec);
             assert_resolve(
                 syntax_binding(
                     add,
@@ -564,7 +653,7 @@ mod tests {
                 op(op(int(2), "add", int(3)), "*", int(4)),
             ),
         ] {
-            let spec = Some((OpAssoc::Left, prec));
+            let spec = declared(OpAssoc::Left, prec);
             assert_resolve(
                 syntax_binding(spec, "add", syntax_var("+"), syntax_int_ops(2, &rest)),
                 binding(spec, "add", var("+"), expected),
@@ -576,8 +665,8 @@ mod tests {
     fn test_equal_precedence_uses_following_operator_associativity() {
         for sub_assoc in [OpAssoc::Left, OpAssoc::Right] {
             for add_assoc in [OpAssoc::Left, OpAssoc::Right] {
-                let sub = Some((sub_assoc, 5));
-                let add = Some((add_assoc, 5));
+                let sub = declared(sub_assoc, 5);
+                let add = declared(add_assoc, 5);
                 let body = match add_assoc {
                     OpAssoc::Left => op(op(int(10), "sub", int(3)), "add", int(2)),
                     OpAssoc::Right => op(int(10), "sub", op(int(3), "add", int(2))),
@@ -677,8 +766,8 @@ mod tests {
             assert_resolve(syntax, expected);
         }
 
-        let left = Some((OpAssoc::Left, 1));
-        let right = Some((OpAssoc::Right, 1));
+        let left = declared(OpAssoc::Left, 1);
+        let right = declared(OpAssoc::Right, 1);
         assert_resolve(
             syntax_binding(
                 left,
@@ -703,8 +792,8 @@ mod tests {
             ),
             binding(right, "sub", var("-"), left_sub_chain()),
         );
-        let add = Some((OpAssoc::Left, 5));
-        let mul = Some((OpAssoc::Left, 6));
+        let add = declared(OpAssoc::Left, 5);
+        let mul = declared(OpAssoc::Left, 6);
         assert_resolve(
             syntax_binding(
                 add,
@@ -772,8 +861,8 @@ mod tests {
 
     #[test]
     fn test_nested_declaration_does_not_leak_into_outer_chain() {
-        let left = Some((OpAssoc::Left, 1));
-        let right = Some((OpAssoc::Right, 1));
+        let left = declared(OpAssoc::Left, 1);
+        let right = declared(OpAssoc::Right, 1);
         assert_resolve(
             syntax_binding(
                 left,
@@ -799,8 +888,8 @@ mod tests {
                 ),
             ),
         );
-        let low = Some((OpAssoc::Left, 0));
-        let high = Some((OpAssoc::Left, 5));
+        let low = declared(OpAssoc::Left, 0);
+        let high = declared(OpAssoc::Left, 5);
         let chain = syntax_int_ops(2, &[("add", 3), ("*", 4)]);
         assert_resolve(
             syntax_binding(
@@ -839,8 +928,8 @@ mod tests {
 
     #[test]
     fn test_nested_declaration_does_not_leak_into_siblings() {
-        let left = Some((OpAssoc::Left, 1));
-        let right = Some((OpAssoc::Right, 1));
+        let left = declared(OpAssoc::Left, 1);
+        let right = declared(OpAssoc::Right, 1);
         let nested = syntax_binding(right, "sub", syntax_var("-"), sub_chain());
         let expected_nested = binding(right, "sub", var("-"), right_sub_chain());
         assert_resolve(
@@ -883,8 +972,8 @@ mod tests {
 
     #[test]
     fn test_function_fixity_is_lexical_not_call_site_dependent() {
-        let left = Some((OpAssoc::Left, 1));
-        let right = Some((OpAssoc::Right, 1));
+        let left = declared(OpAssoc::Left, 1);
+        let right = declared(OpAssoc::Right, 1);
         let syntax_f = syntax_call(syntax_call(syntax_var("f"), vec![]), vec![]);
         let f = call(call(var("f"), vec![]), vec![]);
         assert_resolve(
@@ -942,7 +1031,7 @@ mod tests {
 
     #[test]
     fn test_plain_bindings_shadow_operator_fixity() {
-        let right = Some((OpAssoc::Right, 5));
+        let right = declared(OpAssoc::Right, 5);
         assert_resolve(
             syntax_binding(None, "sub", syntax_var("-"), sub_chain()),
             binding(None, "sub", var("-"), left_sub_chain()),
@@ -964,10 +1053,10 @@ mod tests {
                 )
             },
             {
-                let wrap = spanned(Patt::Struct(
-                    "wrap",
-                    spanned(vec![spanned(Patt::Var("sub"))]),
-                ));
+                let wrap = spanned(Patt::Struct(StructPatt {
+                    name: "wrap",
+                    args: spanned(vec![spanned(Patt::Var("sub"))]),
+                }));
                 (
                     syntax_case(syntax_var("wrapped"), vec![(wrap.clone(), sub_chain())]),
                     case(var("wrapped"), vec![(wrap, left_sub_chain())]),
@@ -983,8 +1072,8 @@ mod tests {
 
     #[test]
     fn test_expressions_use_previous_binding_fixity() {
-        let left = Some((OpAssoc::Left, 1));
-        let right = Some((OpAssoc::Right, 1));
+        let left = declared(OpAssoc::Left, 1);
+        let right = declared(OpAssoc::Right, 1);
         for (old, new, expected) in [
             (right, None, right_sub_chain()),
             (left, right, left_sub_chain()),
@@ -1012,7 +1101,7 @@ mod tests {
             (OpAssoc::Left, left_sub_chain()),
             (OpAssoc::Right, right_sub_chain()),
         ] {
-            let spec = Some((assoc, 1));
+            let spec = declared(assoc, 1);
             assert_resolve(
                 syntax_binding(
                     spec,
@@ -1037,27 +1126,33 @@ mod tests {
             },
             RecFn {
                 name: spanned("sub"),
-                fixity: Some((OpAssoc::Right, 4)),
+                fixity: declared(OpAssoc::Right, 4),
                 params: spanned(vec!["a", "b"]),
                 body: syntax_var("a"),
             },
             RecFn {
                 name: spanned("join"),
-                fixity: Some((OpAssoc::Left, 2)),
+                fixity: declared(OpAssoc::Left, 2),
                 params: spanned(vec!["a", "b"]),
                 body: syntax_var("a"),
             },
         ];
-        let syntax = spanned(SyntaxExpr::LetRec(members, Box::new(chain)));
+        let syntax = spanned(SyntaxExpr::LetRec(LetRec {
+            bindings: members,
+            body: Box::new(chain),
+        }));
         let expr = resolve(
             syntax,
-            &[("sub", OpAssoc::Left, 1), ("join", OpAssoc::Right, 7)],
+            &[
+                spec("sub", OpAssoc::Left, 1),
+                spec("join", OpAssoc::Right, 7),
+            ],
         );
-        let Expr::LetRec(members, body) = expr.0 else {
+        let Expr::LetRec(LetRec { bindings, body }) = expr.value else {
             panic!("Expected recursive let, got {expr:?}");
         };
         let expected = op(op(right_sub_chain(), "join", int(5)), "join", int(1));
-        assert_eq!(*members[0].body, expected);
+        assert_eq!(*bindings[0].body, expected);
         assert_eq!(*body, expected);
     }
 
@@ -1065,7 +1160,7 @@ mod tests {
     fn test_recursive_group_fixities_follow_binding_and_parameter_shadowing() {
         for (fixity, peer_body) in [
             (None, left_sub_chain()),
-            (Some((OpAssoc::Right, 4)), right_sub_chain()),
+            (declared(OpAssoc::Right, 4), right_sub_chain()),
         ] {
             let functions = [
                 ("shadow", vec!["sub"]),
@@ -1080,7 +1175,7 @@ mod tests {
                 body: sub_chain(),
             })
             .collect();
-            let (members, specs) = resolve_let_rec(functions, &[("sub", OpAssoc::Right, 7)]);
+            let (members, specs) = resolve_let_rec(functions, &[spec("sub", OpAssoc::Right, 7)]);
             assert_eq!(*members[0].body, left_sub_chain());
             assert_eq!(*members[1].body, peer_body);
             assert_eq!(*members[2].body, peer_body);
@@ -1090,8 +1185,8 @@ mod tests {
 
     #[test]
     fn test_builtin_operator_fixity_can_be_shadowed() {
-        let right = Some((OpAssoc::Right, 4));
-        let left = Some((OpAssoc::Left, 5));
+        let right = declared(OpAssoc::Right, 4);
+        let left = declared(OpAssoc::Left, 5);
         assert_resolve(
             syntax_binding(
                 None,
@@ -1144,19 +1239,19 @@ mod tests {
 
     #[test]
     fn test_supplied_operator_specs_are_used() {
-        let spec = Some((OpAssoc::Left, 0));
+        let fixity = declared(OpAssoc::Left, 0);
         let syntax = syntax_binding(
-            spec,
+            fixity,
             "unused",
             syntax_function(vec!["a", "b"], syntax_var("a")),
             sub_chain(),
         );
-        let expr = resolve(syntax, &[("sub", OpAssoc::Right, 7)]);
+        let expr = resolve(syntax, &[spec("sub", OpAssoc::Right, 7)]);
 
         assert_eq!(
             expr,
             binding(
-                spec,
+                fixity,
                 "unused",
                 function(vec!["a", "b"], var("a")),
                 right_sub_chain()

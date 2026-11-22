@@ -34,13 +34,14 @@ pub fn expr_and_item_parsers<
         .to(OpAssoc::Left)
         .or(just(Token::Opr).to(OpAssoc::Right))
         .then(select! { Token::Int(v) => v })
+        .map(|(assoc, precedence)| Fixity { assoc, precedence })
         .or_not()
-        .then(ident.map_with(|name, e| (name, e.span())))
+        .then(ident.map_with(|name, e| Spanned::new(name, e.span())))
         .then_ignore(just(Token::Assign));
 
     let let_head = just(Token::Let)
         .ignore_then(binding_head.clone())
-        .map(|(fixity, (name, _))| (fixity, name));
+        .map(|(fixity, name)| (fixity, name.value));
 
     let mut let_rec_head = Recursive::declare();
     let mut expr = Recursive::declare();
@@ -54,7 +55,7 @@ pub fn expr_and_item_parsers<
             Token::OpenBrace,
             Token::CloseBrace,
             [(Token::OpenParen, Token::CloseParen)],
-            |span| (SyntaxExpr::Atom(Expr::Err), span),
+            |span| Spanned::new(SyntaxExpr::Atom(Expr::Err), span),
         )))
         .labelled("block expression");
 
@@ -66,12 +67,12 @@ pub fn expr_and_item_parsers<
             Token::OpenParen,
             Token::CloseParen,
             [(Token::OpenBrace, Token::CloseBrace)],
-            |span| (SyntaxExpr::Atom(Expr::Err), span),
+            |span| Spanned::new(SyntaxExpr::Atom(Expr::Err), span),
         )))
         .labelled("parenthesized expression");
 
     let atom = choice((lit, var))
-        .map_with(|expr, e| (expr, e.span()))
+        .map_with(|expr, e| Spanned::new(expr, e.span()))
         .or(choice((block, paren)));
 
     let call = atom
@@ -84,9 +85,17 @@ pub fn expr_and_item_parsers<
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
                 .or(just(Token::Dot).map(|_| vec![]))
-                .map_with(|args, e| (args, e.span()))
+                .map_with(|args, e| Spanned::new(args, e.span()))
                 .repeated(),
-            |f, args, e| (SyntaxExpr::Call(Box::new(f), args), e.span()),
+            |callee, args, e| {
+                Spanned::new(
+                    SyntaxExpr::Call(Call {
+                        callee: Box::new(callee),
+                        args,
+                    }),
+                    e.span(),
+                )
+            },
         )
         .labelled("call expression");
 
@@ -97,14 +106,20 @@ pub fn expr_and_item_parsers<
                 .allow_trailing()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-                .map_with(|params, e| (params, e.span())),
+                .map_with(|params, e| Spanned::new(params, e.span())),
         )
         .then(inline.clone())
         .labelled("function expression");
 
-    let r#fn = fn_parts
-        .clone()
-        .map_with(|(params, body), e| (SyntaxExpr::Fn(params, Box::new(body)), e.span()));
+    let r#fn = fn_parts.clone().map_with(|(params, body), e| {
+        Spanned::new(
+            SyntaxExpr::Fn(FnExpr {
+                params,
+                body: Box::new(body),
+            }),
+            e.span(),
+        )
+    });
 
     let patt = recursive(|case_patt| {
         let r#struct = ident
@@ -115,22 +130,25 @@ pub fn expr_and_item_parsers<
                     .allow_trailing()
                     .collect::<Vec<_>>()
                     .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-                    .map_with(|patt, e| (patt, e.span())),
+                    .map_with(|patt, e| Spanned::new(patt, e.span())),
             )
-            .map(|(name, args)| Patt::Struct(name, args))
+            .map(|(name, args)| Patt::Struct(StructPatt { name, args }))
             .labelled("struct pattern");
         let var = ident.map(Patt::Var).labelled("variable pattern");
         let lit = value.map(Patt::Lit).labelled("literal pattern");
 
         choice((r#struct, var, lit))
-            .map_with(|patt, e| (patt, e.span()))
+            .map_with(|patt, e| Spanned::new(patt, e.span()))
             .labelled("pattern")
     });
 
     let case_arm = patt
         .then_ignore(just(Token::PattArm))
         .then(inline.clone())
-        .map(|(patt, body)| (patt, Box::new(body)))
+        .map(|(patt, body)| CaseArm {
+            patt,
+            body: Box::new(body),
+        })
         .labelled("case expression arm");
 
     let case = just(Token::Case)
@@ -141,9 +159,17 @@ pub fn expr_and_item_parsers<
                 .at_least(1)
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
-                .map_with(|arms, e| (arms, e.span())),
+                .map_with(|arms, e| Spanned::new(arms, e.span())),
         )
-        .map_with(|(expr, arms), e| (SyntaxExpr::Case(Box::new(expr), arms), e.span()))
+        .map_with(|(scrutinee, arms), e| {
+            Spanned::new(
+                SyntaxExpr::Case(Case {
+                    scrutinee: Box::new(scrutinee),
+                    arms,
+                }),
+                e.span(),
+            )
+        })
         .labelled("case expression");
 
     inline.define(choice((call, r#fn, case)));
@@ -151,18 +177,37 @@ pub fn expr_and_item_parsers<
     op.define(
         inline
             .clone()
-            .then(atom.then(inline.clone()).repeated().at_least(1).collect())
-            .map_with(|(first, rest), e| (SyntaxExpr::Ops(Box::new(first), rest), e.span())),
+            .then(
+                atom.then(inline.clone())
+                    .map(|(op, rhs)| OpStep { op, rhs })
+                    .repeated()
+                    .at_least(1)
+                    .collect(),
+            )
+            .map_with(|(first, rest), e| {
+                Spanned::new(
+                    SyntaxExpr::Ops(Ops {
+                        first: Box::new(first),
+                        rest,
+                    }),
+                    e.span(),
+                )
+            }),
     );
 
     let r#let = let_head
         .clone()
         .then(inline.clone())
         .then(expr.clone())
-        .map(|(((op_spec, x), assign), body)| {
-            SyntaxExpr::Let(op_spec, x, Box::new(assign), Box::new(body))
+        .map(|(((fixity, name), init), body)| {
+            SyntaxExpr::Let(Let {
+                fixity,
+                name,
+                init: Box::new(init),
+                body: Box::new(body),
+            })
         })
-        .map_with(|expr, e| (expr, e.span()))
+        .map_with(|expr, e| Spanned::new(expr, e.span()))
         .labelled("let expression");
 
     let rec_fn = binding_head
@@ -184,7 +229,7 @@ pub fn expr_and_item_parsers<
                 .validate(|bindings, _, emitter| {
                     let mut names = HashSet::new();
                     for binding in &bindings {
-                        let (name, span) = binding.name;
+                        let Spanned { value: name, span } = binding.name;
                         if !names.insert(name) {
                             emitter.emit(Rich::custom(
                                 span,
@@ -200,7 +245,15 @@ pub fn expr_and_item_parsers<
     let let_rec = let_rec_head
         .clone()
         .then(expr.clone())
-        .map_with(|(bindings, body), e| (SyntaxExpr::LetRec(bindings, Box::new(body)), e.span()))
+        .map_with(|(bindings, body), e| {
+            Spanned::new(
+                SyntaxExpr::LetRec(LetRec {
+                    bindings,
+                    body: Box::new(body),
+                }),
+                e.span(),
+            )
+        })
         .labelled("recursive let expression");
 
     expr.define(choice((op, inline, r#let, let_rec)).labelled("expression"));
@@ -208,7 +261,7 @@ pub fn expr_and_item_parsers<
     let let_item = let_head
         .then(expr.clone())
         .then_ignore(end())
-        .map(|((op_spec, name), expr)| ReplItem::Let(op_spec, name, expr))
+        .map(|((fixity, name), init)| ReplItem::Let(LetBinding { fixity, name, init }))
         .labelled("let item");
 
     let let_rec_item = let_rec_head
@@ -241,12 +294,82 @@ mod tests {
         first: Spanned<SyntaxExpr<'src>>,
         rest: Vec<(&'src str, Spanned<SyntaxExpr<'src>>)>,
     ) -> Spanned<SyntaxExpr<'src>> {
-        spanned(SyntaxExpr::Ops(
-            Box::new(first),
-            rest.into_iter()
-                .map(|(op, right)| (atom(Expr::Var(op)), right))
+        spanned(SyntaxExpr::Ops(Ops {
+            first: Box::new(first),
+            rest: rest
+                .into_iter()
+                .map(|(op, rhs)| OpStep {
+                    op: atom(Expr::Var(op)),
+                    rhs,
+                })
                 .collect(),
-        ))
+        }))
+    }
+
+    fn var(name: &str) -> Spanned<SyntaxExpr<'_>> {
+        atom(Expr::Var(name))
+    }
+
+    fn int(value: i64) -> Spanned<SyntaxExpr<'static>> {
+        atom(Expr::Lit(Value::Int(value)))
+    }
+
+    fn call<'src>(
+        callee: Spanned<SyntaxExpr<'src>>,
+        args: Vec<Spanned<SyntaxExpr<'src>>>,
+    ) -> Spanned<SyntaxExpr<'src>> {
+        spanned(SyntaxExpr::Call(Call {
+            callee: Box::new(callee),
+            args: spanned(args),
+        }))
+    }
+
+    fn function<'src>(
+        params: Vec<&'src str>,
+        body: Spanned<SyntaxExpr<'src>>,
+    ) -> Spanned<SyntaxExpr<'src>> {
+        spanned(SyntaxExpr::Fn(FnExpr {
+            params: spanned(params),
+            body: Box::new(body),
+        }))
+    }
+
+    fn case<'src>(
+        scrutinee: Spanned<SyntaxExpr<'src>>,
+        arms: Vec<(Patt<'src>, Spanned<SyntaxExpr<'src>>)>,
+    ) -> Spanned<SyntaxExpr<'src>> {
+        spanned(SyntaxExpr::Case(Case {
+            scrutinee: Box::new(scrutinee),
+            arms: spanned(
+                arms.into_iter()
+                    .map(|(patt, body)| CaseArm {
+                        patt: spanned(patt),
+                        body: Box::new(body),
+                    })
+                    .collect(),
+            ),
+        }))
+    }
+
+    fn struct_patt<'src>(name: &'src str, args: Vec<Spanned<Patt<'src>>>) -> Patt<'src> {
+        Patt::Struct(StructPatt {
+            name,
+            args: spanned(args),
+        })
+    }
+
+    fn binding<'src>(
+        fixity: Option<Fixity>,
+        name: &'src str,
+        init: Spanned<SyntaxExpr<'src>>,
+        body: Spanned<SyntaxExpr<'src>>,
+    ) -> Spanned<SyntaxExpr<'src>> {
+        spanned(SyntaxExpr::Let(Let {
+            fixity,
+            name,
+            init: Box::new(init),
+            body: Box::new(body),
+        }))
     }
 
     macro_rules! assert_parse {
@@ -259,7 +382,7 @@ mod tests {
             let (ast, errs) = expr
                 .parse(
                     toks.as_slice()
-                        .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+                        .map((src.len()..src.len()).into(), Spanned::as_parts),
                 )
                 .into_output_errors();
 
@@ -365,63 +488,35 @@ mod tests {
 
     #[test]
     fn test_call_no_args_parentheses() {
-        assert_parse!(
-            "foo()",
-            spanned(SyntaxExpr::Call(
-                Box::new(atom(Expr::Var("foo"))),
-                spanned(vec![])
-            )),
-        );
+        assert_parse!("foo()", call(var("foo"), vec![]));
     }
 
     #[test]
     fn test_call_no_args_dot() {
-        assert_parse!(
-            "bar.",
-            spanned(SyntaxExpr::Call(
-                Box::new(atom(Expr::Var("bar"))),
-                spanned(vec![]),
-            )),
-        );
+        assert_parse!("bar.", call(var("bar"), vec![]));
     }
 
     #[test]
     fn test_call_multiple_arg_types() {
         assert_parse!(
             "foo(1, 2.0, bar)",
-            spanned(SyntaxExpr::Call(
-                Box::new(atom(Expr::Var("foo"))),
-                spanned(vec![
-                    atom(Expr::Lit(Value::Int(1))),
-                    atom(Expr::Lit(Value::Float(2.0))),
-                    atom(Expr::Var("bar")),
-                ]),
-            )),
+            call(
+                var("foo"),
+                vec![int(1), atom(Expr::Lit(Value::Float(2.0))), var("bar"),],
+            ),
         );
     }
 
     #[test]
     fn test_call_single_int_arg() {
-        assert_parse!(
-            "bar(42)",
-            spanned(SyntaxExpr::Call(
-                Box::new(atom(Expr::Var("bar"))),
-                spanned(vec![atom(Expr::Lit(Value::Int(42)))]),
-            )),
-        );
+        assert_parse!("bar(42)", call(var("bar"), vec![int(42)]));
     }
 
     #[test]
     fn test_call_chained_calls() {
         assert_parse!(
             "foo(bar)(baz)",
-            spanned(SyntaxExpr::Call(
-                Box::new(spanned(SyntaxExpr::Call(
-                    Box::new(atom(Expr::Var("foo"))),
-                    spanned(vec![atom(Expr::Var("bar"))]),
-                ))),
-                spanned(vec![atom(Expr::Var("baz"))]),
-            )),
+            call(call(var("foo"), vec![var("bar")]), vec![var("baz")]),
         );
     }
 
@@ -429,13 +524,7 @@ mod tests {
     fn test_call_chained_call_with_dot() {
         assert_parse!(
             "foo(bar).",
-            spanned(SyntaxExpr::Call(
-                Box::new(spanned(SyntaxExpr::Call(
-                    Box::new(atom(Expr::Var("foo"))),
-                    spanned(vec![atom(Expr::Var("bar"))]),
-                ))),
-                spanned(vec![]),
-            )),
+            call(call(var("foo"), vec![var("bar")]), vec![]),
         );
     }
 
@@ -443,55 +532,31 @@ mod tests {
     fn test_call_nested_call_as_arg() {
         assert_parse!(
             "foo(bar, baz(42))",
-            spanned(SyntaxExpr::Call(
-                Box::new(atom(Expr::Var("foo"))),
-                spanned(vec![
-                    atom(Expr::Var("bar")),
-                    spanned(SyntaxExpr::Call(
-                        Box::new(atom(Expr::Var("baz"))),
-                        spanned(vec![atom(Expr::Lit(Value::Int(42)))]),
-                    )),
-                ]),
-            )),
+            call(
+                var("foo"),
+                vec![var("bar"), call(var("baz"), vec![int(42)])]
+            ),
         );
     }
 
     #[test]
     fn test_fn_no_params_block_body() {
-        assert_parse!(
-            "fn() { 42 }",
-            spanned(SyntaxExpr::Fn(
-                spanned(vec![]),
-                Box::new(atom(Expr::Lit(Value::Int(42)))),
-            )),
-        );
+        assert_parse!("fn() { 42 }", function(vec![], int(42)));
     }
 
     #[test]
     fn test_fn_single_param_expr_body() {
-        assert_parse!(
-            "fn(x) x",
-            spanned(SyntaxExpr::Fn(
-                spanned(vec!["x"]),
-                Box::new(atom(Expr::Var("x"))),
-            )),
-        );
+        assert_parse!("fn(x) x", function(vec!["x"], var("x")));
     }
 
     #[test]
     fn test_fn_nested_block_body() {
         assert_parse!(
             "fn(x) { fn(y) x(y) }",
-            spanned(SyntaxExpr::Fn(
-                spanned(vec!["x"]),
-                Box::new(spanned(SyntaxExpr::Fn(
-                    spanned(vec!["y"]),
-                    Box::new(spanned(SyntaxExpr::Call(
-                        Box::new(atom(Expr::Var("x"))),
-                        spanned(vec![atom(Expr::Var("y"))]),
-                    ))),
-                ))),
-            )),
+            function(
+                vec!["x"],
+                function(vec!["y"], call(var("x"), vec![var("y")]))
+            ),
         );
     }
 
@@ -499,16 +564,10 @@ mod tests {
     fn test_fn_nested_expr_body() {
         assert_parse!(
             "fn(x) fn(y) x(y)",
-            spanned(SyntaxExpr::Fn(
-                spanned(vec!["x"]),
-                Box::new(spanned(SyntaxExpr::Fn(
-                    spanned(vec!["y"]),
-                    Box::new(spanned(SyntaxExpr::Call(
-                        Box::new(atom(Expr::Var("x"))),
-                        spanned(vec![atom(Expr::Var("y"))]),
-                    ))),
-                ))),
-            )),
+            function(
+                vec!["x"],
+                function(vec!["y"], call(var("x"), vec![var("y")]))
+            ),
         );
     }
 
@@ -516,13 +575,7 @@ mod tests {
     fn test_fn_multiple_params_block_body() {
         assert_parse!(
             "fn(x, y) { x(y) }",
-            spanned(SyntaxExpr::Fn(
-                spanned(vec!["x", "y"]),
-                Box::new(spanned(SyntaxExpr::Call(
-                    Box::new(atom(Expr::Var("x"))),
-                    spanned(vec![atom(Expr::Var("y"))]),
-                ))),
-            )),
+            function(vec!["x", "y"], call(var("x"), vec![var("y")])),
         );
     }
 
@@ -530,13 +583,7 @@ mod tests {
     fn test_case_single_arm_lit_pattern() {
         assert_parse!(
             "case x { 42 => y }",
-            spanned(SyntaxExpr::Case(
-                Box::new(atom(Expr::Var("x"))),
-                spanned(vec![(
-                    spanned(Patt::Lit(Value::Int(42))),
-                    Box::new(atom(Expr::Var("y"))),
-                )]),
-            )),
+            case(var("x"), vec![(Patt::Lit(Value::Int(42)), var("y"))]),
         );
     }
 
@@ -544,13 +591,7 @@ mod tests {
     fn test_case_single_arm_var_pattern() {
         assert_parse!(
             "case x { y => z }",
-            spanned(SyntaxExpr::Case(
-                Box::new(atom(Expr::Var("x"))),
-                spanned(vec![(
-                    spanned(Patt::Var("y")),
-                    Box::new(atom(Expr::Var("z"))),
-                )]),
-            )),
+            case(var("x"), vec![(Patt::Var("y"), var("z"))]),
         );
     }
 
@@ -558,13 +599,10 @@ mod tests {
     fn test_case_single_arm_struct_pattern() {
         assert_parse!(
             "case x { y(z) => w }",
-            spanned(SyntaxExpr::Case(
-                Box::new(atom(Expr::Var("x"))),
-                spanned(vec![(
-                    spanned(Patt::Struct("y", spanned(vec![spanned(Patt::Var("z"))]))),
-                    Box::new(atom(Expr::Var("w"))),
-                )]),
-            )),
+            case(
+                var("x"),
+                vec![(struct_patt("y", vec![spanned(Patt::Var("z"))]), var("w"))]
+            ),
         );
     }
 
@@ -578,26 +616,17 @@ mod tests {
                 y(z) => f(z)
             }
             ",
-            spanned(SyntaxExpr::Case(
-                Box::new(atom(Expr::Var("x"))),
-                spanned(vec![
+            case(
+                var("x"),
+                vec![
+                    (Patt::Var("w"), int(42)),
+                    (Patt::Lit(Value::Int(42)), var("x")),
                     (
-                        spanned(Patt::Var("w")),
-                        Box::new(atom(Expr::Lit(Value::Int(42)))),
+                        struct_patt("y", vec![spanned(Patt::Var("z"))]),
+                        call(var("f"), vec![var("z")]),
                     ),
-                    (
-                        spanned(Patt::Lit(Value::Int(42))),
-                        Box::new(atom(Expr::Var("x"))),
-                    ),
-                    (
-                        spanned(Patt::Struct("y", spanned(vec![spanned(Patt::Var("z"))]))),
-                        Box::new(spanned(SyntaxExpr::Call(
-                            Box::new(atom(Expr::Var("f"))),
-                            spanned(vec![atom(Expr::Var("z"))]),
-                        ))),
-                    ),
-                ]),
-            )),
+                ],
+            ),
         );
     }
 
@@ -605,13 +634,10 @@ mod tests {
     fn test_case_op() {
         assert_parse!(
             "case (x + y) { 42 => z }",
-            spanned(SyntaxExpr::Case(
-                Box::new(ops(atom(Expr::Var("x")), vec![("+", atom(Expr::Var("y")))])),
-                spanned(vec![(
-                    spanned(Patt::Lit(Value::Int(42))),
-                    Box::new(atom(Expr::Var("z"))),
-                )]),
-            )),
+            case(
+                ops(var("x"), vec![("+", var("y"))]),
+                vec![(Patt::Lit(Value::Int(42)), var("z"))]
+            ),
         );
     }
 
@@ -658,15 +684,7 @@ mod tests {
             atom(Expr::Lit(Value::Int(3))),
             atom(Expr::Lit(Value::Int(4))),
         );
-        let call_id = |arg| {
-            spanned(SyntaxExpr::Call(
-                Box::new(spanned(SyntaxExpr::Call(
-                    Box::new(atom(Expr::Var("id"))),
-                    spanned(vec![arg]),
-                ))),
-                spanned(vec![]),
-            ))
-        };
+        let call_id = |arg| call(call(var("id"), vec![arg]), vec![]);
         assert_parse!(
             "2 * id(3). + id(4).",
             ops(
@@ -687,12 +705,7 @@ mod tests {
             let x = 42
             x
             ",
-            spanned(SyntaxExpr::Let(
-                None,
-                "x",
-                Box::new(atom(Expr::Lit(Value::Int(42)))),
-                Box::new(atom(Expr::Var("x"))),
-            )),
+            binding(None, "x", int(42), var("x")),
         );
     }
 
@@ -703,12 +716,7 @@ mod tests {
             let x = y
             y
             ",
-            spanned(SyntaxExpr::Let(
-                None,
-                "x",
-                Box::new(atom(Expr::Var("y"))),
-                Box::new(atom(Expr::Var("y"))),
-            )),
+            binding(None, "x", var("y"), var("y")),
         );
     }
 
@@ -722,17 +730,7 @@ mod tests {
             }
             x
             ",
-            spanned(SyntaxExpr::Let(
-                None,
-                "x",
-                Box::new(spanned(SyntaxExpr::Let(
-                    None,
-                    "y",
-                    Box::new(atom(Expr::Lit(Value::Int(42)))),
-                    Box::new(atom(Expr::Var("y"))),
-                ))),
-                Box::new(atom(Expr::Var("x"))),
-            )),
+            binding(None, "x", binding(None, "y", int(42), var("y")), var("x")),
         );
     }
 
@@ -744,17 +742,23 @@ mod tests {
             let opr 1 y = x
             y
             ",
-            spanned(SyntaxExpr::Let(
-                Some((OpAssoc::Left, 0)),
+            binding(
+                Some(Fixity {
+                    assoc: OpAssoc::Left,
+                    precedence: 0
+                }),
                 "x",
-                Box::new(atom(Expr::Lit(Value::Int(42)))),
-                Box::new(spanned(SyntaxExpr::Let(
-                    Some((OpAssoc::Right, 1)),
+                int(42),
+                binding(
+                    Some(Fixity {
+                        assoc: OpAssoc::Right,
+                        precedence: 1
+                    }),
                     "y",
-                    Box::new(atom(Expr::Var("x"))),
-                    Box::new(atom(Expr::Var("y"))),
-                ))),
-            )),
+                    var("x"),
+                    var("y"),
+                ),
+            ),
         );
     }
 
@@ -763,8 +767,8 @@ mod tests {
         assert_parse!(
             "let { first = fn(n) later opl 4 left = fn(a, b) { a }
                    opr 2 later = fn(a, b) b } first",
-            spanned(SyntaxExpr::LetRec(
-                vec![
+            spanned(SyntaxExpr::LetRec(LetRec {
+                bindings: vec![
                     RecFn {
                         name: spanned("first"),
                         fixity: None,
@@ -773,19 +777,25 @@ mod tests {
                     },
                     RecFn {
                         name: spanned("left"),
-                        fixity: Some((OpAssoc::Left, 4)),
+                        fixity: Some(Fixity {
+                            assoc: OpAssoc::Left,
+                            precedence: 4
+                        }),
                         params: spanned(vec!["a", "b"]),
                         body: atom(Expr::Var("a")),
                     },
                     RecFn {
                         name: spanned("later"),
-                        fixity: Some((OpAssoc::Right, 2)),
+                        fixity: Some(Fixity {
+                            assoc: OpAssoc::Right,
+                            precedence: 2
+                        }),
                         params: spanned(vec!["a", "b"]),
                         body: atom(Expr::Var("b")),
                     },
                 ],
-                Box::new(atom(Expr::Var("first"))),
-            )),
+                body: Box::new(var("first")),
+            })),
         );
     }
 
@@ -803,7 +813,7 @@ mod tests {
             assert!(
                 expr.parse(
                     toks.as_slice()
-                        .map((src.len()..src.len()).into(), |(t, s)| (t, s))
+                        .map((src.len()..src.len()).into(), Spanned::as_parts)
                 )
                 .has_errors(),
                 "{src}"
@@ -820,7 +830,7 @@ mod tests {
         let errors = expr
             .parse(
                 toks.as_slice()
-                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+                    .map((src.len()..src.len()).into(), Spanned::as_parts),
             )
             .into_errors();
         assert!(
@@ -839,7 +849,7 @@ mod tests {
         let (expr, _) = expr_and_item_parsers();
         expr.parse(
             toks.as_slice()
-                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+                .map((src.len()..src.len()).into(), Spanned::as_parts),
         )
         .unwrap();
     }
@@ -849,7 +859,7 @@ mod tests {
         let (_, item) = expr_and_item_parsers();
         item.parse(
             toks.as_slice()
-                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+                .map((src.len()..src.len()).into(), Spanned::as_parts),
         )
         .into_result()
         .map_err(|errors| errors.into_iter().map(|error| error.to_string()).collect())
@@ -858,29 +868,35 @@ mod tests {
     #[test]
     fn test_repl_item_accepts_standalone_let_with_infix_expr() {
         let item = parse_repl_item("let x = 2 + 3 * 4").unwrap();
-        let expected = ReplItem::Let(
-            None,
-            "x",
-            ops(
+        let expected = ReplItem::Let(LetBinding {
+            fixity: None,
+            name: "x",
+            init: ops(
                 atom(Expr::Lit(Value::Int(2))),
                 vec![
                     ("+", atom(Expr::Lit(Value::Int(3)))),
                     ("*", atom(Expr::Lit(Value::Int(4)))),
                 ],
             ),
-        );
+        });
         assert!(item.spanless_eq(&expected), "{item:?}");
     }
 
     #[test]
     fn test_repl_item_accepts_operator_declaration() {
         let item = parse_repl_item("let opr 3 sub = fn(a, b) {\n    a - b\n}").unwrap();
-        let ReplItem::Let(op_spec, name, expr) = item else {
+        let ReplItem::Let(LetBinding { fixity, name, init }) = item else {
             panic!("Expected declaration, got {item:?}");
         };
-        assert_eq!(op_spec, Some((OpAssoc::Right, 3)));
+        assert_eq!(
+            fixity,
+            Some(Fixity {
+                assoc: OpAssoc::Right,
+                precedence: 3
+            })
+        );
         assert_eq!(name, "sub");
-        assert!(matches!(expr.0, SyntaxExpr::Fn(..)));
+        assert!(matches!(init.value, SyntaxExpr::Fn(_)));
     }
 
     #[test]
@@ -890,13 +906,16 @@ mod tests {
         let ReplItem::LetRec(members) = item else {
             panic!("Expected recursive let declaration, got {item:?}");
         };
-        assert_eq!(members[0].name.0, "f");
-        assert!(matches!(members[0].body.0, SyntaxExpr::Let(..)));
+        assert_eq!(members[0].name.value, "f");
+        assert!(matches!(members[0].body.value, SyntaxExpr::Let(_)));
 
         let expression = format!("{declaration} f().");
         assert!(matches!(
             parse_repl_item(&expression),
-            Ok(ReplItem::Expr((SyntaxExpr::LetRec(..), _)))
+            Ok(ReplItem::Expr(Spanned {
+                value: SyntaxExpr::LetRec(_),
+                ..
+            }))
         ));
     }
 
@@ -904,15 +923,7 @@ mod tests {
     fn test_repl_item_accepts_ordinary_expressions_and_lets_with_bodies() {
         for (src, expected) in [
             ("42", atom(Expr::Lit(Value::Int(42)))),
-            (
-                "let x = 42\nx",
-                spanned(SyntaxExpr::Let(
-                    None,
-                    "x",
-                    Box::new(atom(Expr::Lit(Value::Int(42)))),
-                    Box::new(atom(Expr::Var("x"))),
-                )),
-            ),
+            ("let x = 42\nx", binding(None, "x", int(42), var("x"))),
         ] {
             let item = parse_repl_item(src).unwrap();
             assert!(item.spanless_eq(&ReplItem::Expr(expected)), "{item:?}");
@@ -960,13 +971,13 @@ mod tests {
     #[test]
     fn test_standalone_let_is_only_valid_at_the_repl_root() {
         let src = "let x = 42";
-        assert!(matches!(parse_repl_item(src), Ok(ReplItem::Let { .. })));
+        assert!(matches!(parse_repl_item(src), Ok(ReplItem::Let(_))));
         let toks = lex::lexer().parse(src).unwrap();
         let (expr, _) = expr_and_item_parsers();
         assert!(
             expr.parse(
                 toks.as_slice()
-                    .map((src.len()..src.len()).into(), |(t, s)| (t, s))
+                    .map((src.len()..src.len()).into(), Spanned::as_parts)
             )
             .has_errors()
         );

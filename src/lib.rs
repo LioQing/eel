@@ -6,6 +6,7 @@ use std::{
 
 use chumsky::prelude::*;
 
+use crate::declare::Spanned;
 use crate::source::SourceMap;
 
 mod builtin;
@@ -89,7 +90,7 @@ pub fn run(filename: impl AsRef<Path>) -> Result<(), RunError> {
 
     let (expr, _) = parse::expr_and_item_parsers();
     let (syntax, parse_errs) = expr
-        .parse(toks.as_slice().map(eoi, |(t, s)| (t, s)))
+        .parse(toks.as_slice().map(eoi, Spanned::as_parts))
         .into_output_errors();
 
     if !parse_errs.is_empty() {

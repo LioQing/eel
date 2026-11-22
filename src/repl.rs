@@ -8,7 +8,7 @@ use typed_arena::Arena;
 
 use crate::{
     builtin,
-    declare::{Env, OpSpec, ReplItem, Value},
+    declare::{Env, LetBinding, OpSpec, ReplItem, Spanned, Value},
     fixity, interp, parse,
     source::{Diagnostic, SourceMap},
 };
@@ -128,7 +128,7 @@ impl<'src> Session<'src> {
         let eoi = source.eof();
         let (_, item_parser) = parse::expr_and_item_parsers();
         let item = item_parser
-            .parse(toks.as_slice().map(eoi, |(t, s)| (t, s)))
+            .parse(toks.as_slice().map(eoi, Spanned::as_parts))
             .into_result()
             .map_err(|errors| errors.into_iter().map(Into::into).collect::<Vec<_>>())?;
 
@@ -140,12 +140,12 @@ impl<'src> Session<'src> {
                 self.env.insert_mut("it", Rc::clone(&value));
 
                 // An implicit binding shadows any explicit fixity for `it`.
-                self.specs.retain(|(name, ..)| *name != "it");
+                self.specs.retain(|spec| spec.name != "it");
 
                 Ok(Some(value))
             }
-            ReplItem::Let(op_spec, name, expr) => {
-                let (expr, specs) = fixity::resolve_let(name, op_spec, expr, &self.specs);
+            ReplItem::Let(LetBinding { fixity, name, init }) => {
+                let (expr, specs) = fixity::resolve_let(name, fixity, init, &self.specs);
                 interp::bind(name, &expr, &mut self.env).map_err(|err| vec![err.into()])?;
                 self.specs = specs;
                 Ok(None)

@@ -1,7 +1,5 @@
 use std::rc::Rc;
 
-use chumsky::prelude::*;
-
 use crate::declare::*;
 
 macro_rules! builtin {
@@ -25,7 +23,7 @@ macro_rules! builtin {
                                     .map(Rc::as_ref)
                                     .ok_or_else(|| Error {
                                         msg: format!("Variable `{}` not found", stringify!($param)),
-                                        span: expr.1.clone(),
+                                        span: expr.span,
                                     })?;
                             )*
                             $body
@@ -45,7 +43,7 @@ macro_rules! builtin {
         let syntax = expr
             .parse(
                 toks.as_slice()
-                    .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+                    .map((src.len()..src.len()).into(), Spanned::as_parts),
             )
             .unwrap();
         let ast = crate::fixity::resolve(syntax, &[]);
@@ -59,7 +57,7 @@ macro_rules! builtin {
                     members: Box::new([ClosureDef {
                         rec_name: None,
                         params: vec![$(stringify!($param)),*],
-                        body: Rc::new(Spanned::new(ast.0, 0..0)),
+                        body: Rc::new(Spanned::new(ast.value, 0..0)),
                     }]),
                 }),
                 member: 0,
@@ -74,47 +72,47 @@ pub fn body_at_call_site<'src>(
 ) -> Rc<Spanned<Expr<'src>>> {
     // Builtin bodies use an empty outer span to mark their internal source.
     // None of their descendant spans may be interpreted as user-source offsets.
-    if body.1.end == 0 {
+    if body.span.end == 0 {
         set_expr_span(Rc::make_mut(&mut body), span);
     }
     body
 }
 
 fn set_expr_span(expr: &mut Spanned<Expr<'_>>, span: Span) {
-    expr.1 = span;
-    match &mut expr.0 {
-        Expr::Call(func, args) => {
-            set_expr_span(func, span);
-            args.1 = span;
-            for arg in &mut args.0 {
+    expr.span = span;
+    match &mut expr.value {
+        Expr::Call(Call { callee, args }) => {
+            set_expr_span(callee, span);
+            args.span = span;
+            for arg in &mut args.value {
                 set_expr_span(arg, span);
             }
         }
-        Expr::Fn(params, body) => {
-            params.1 = span;
+        Expr::Fn(FnExpr { params, body }) => {
+            params.span = span;
             set_expr_span(Rc::make_mut(body), span);
         }
-        Expr::Case(expr, arms) => {
-            set_expr_span(expr, span);
-            arms.1 = span;
-            for (patt, body) in &mut arms.0 {
+        Expr::Case(Case { scrutinee, arms }) => {
+            set_expr_span(scrutinee, span);
+            arms.span = span;
+            for CaseArm { patt, body } in &mut arms.value {
                 set_patt_span(patt, span);
                 set_expr_span(body, span);
             }
         }
-        Expr::Op(left, op, right) => {
-            set_expr_span(left, span);
+        Expr::Op(Op { lhs, op, rhs }) => {
+            set_expr_span(lhs, span);
             set_expr_span(op, span);
-            set_expr_span(right, span);
+            set_expr_span(rhs, span);
         }
-        Expr::Let(_, _, assign, body) => {
-            set_expr_span(assign, span);
+        Expr::Let(Let { init, body, .. }) => {
+            set_expr_span(init, span);
             set_expr_span(body, span);
         }
-        Expr::LetRec(bindings, body) => {
+        Expr::LetRec(LetRec { bindings, body }) => {
             for binding in bindings {
-                binding.name.1 = span;
-                binding.params.1 = span;
+                binding.name.span = span;
+                binding.params.span = span;
                 set_expr_span(Rc::make_mut(&mut binding.body), span);
             }
             set_expr_span(body, span);
@@ -124,11 +122,11 @@ fn set_expr_span(expr: &mut Spanned<Expr<'_>>, span: Span) {
 }
 
 fn set_patt_span(patt: &mut Spanned<Patt<'_>>, span: Span) {
-    patt.1 = span;
-    match &mut patt.0 {
-        Patt::Struct(_, args) => {
-            args.1 = span;
-            for arg in &mut args.0 {
+    patt.span = span;
+    match &mut patt.value {
+        Patt::Struct(StructPatt { args, .. }) => {
+            args.span = span;
+            for arg in &mut args.value {
                 set_patt_span(arg, span);
             }
         }
@@ -152,12 +150,12 @@ pub fn env<'src>() -> Env<'src> {
                     .map(Value::Int)
                     .ok_or_else(|| Error {
                         msg: format!("Integer overflow: {a} + {b}"),
-                        span: expr.1.clone(),
+                        span: expr.span,
                     }),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 _ => Err(Error {
                     msg: format!("Cannot add {a} and {b}"),
-                    span: expr.1.clone(),
+                    span: expr.span,
                 }),
             }
         }),
@@ -167,12 +165,12 @@ pub fn env<'src>() -> Env<'src> {
                     .map(Value::Int)
                     .ok_or_else(|| Error {
                         msg: format!("Integer overflow: {a} - {b}"),
-                        span: expr.1.clone(),
+                        span: expr.span,
                     }),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
                 _ => Err(Error {
                     msg: format!("Cannot subtract {b} from {a}"),
-                    span: expr.1.clone(),
+                    span: expr.span,
                 }),
             }
         }),
@@ -182,12 +180,12 @@ pub fn env<'src>() -> Env<'src> {
                     .map(Value::Int)
                     .ok_or_else(|| Error {
                         msg: format!("Integer overflow: {a} * {b}"),
-                        span: expr.1.clone(),
+                        span: expr.span,
                     }),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
                 _ => Err(Error {
                     msg: format!("Cannot multiply {a} and {b}"),
-                    span: expr.1.clone(),
+                    span: expr.span,
                 }),
             }
         }),
@@ -197,12 +195,12 @@ pub fn env<'src>() -> Env<'src> {
                     .map(Value::Int)
                     .ok_or_else(|| Error {
                         msg: format!("Integer overflow: {a} / {b}"),
-                        span: expr.1.clone(),
+                        span: expr.span,
                     }),
                 (Value::Float(a), Value::Float(b)) if *b != 0.0 => Ok(Value::Float(a / b)),
                 _ => Err(Error {
                     msg: format!("Cannot divide {a} by {b}"),
-                    span: expr.1.clone(),
+                    span: expr.span,
                 }),
             }
         }),
@@ -212,11 +210,11 @@ pub fn env<'src>() -> Env<'src> {
                     .map(Value::Int)
                     .ok_or_else(|| Error {
                         msg: format!("Integer overflow: {a} % {b}"),
-                        span: expr.1.clone(),
+                        span: expr.span,
                     }),
                 _ => Err(Error {
                     msg: format!("Cannot modulo {a} by {b}"),
-                    span: expr.1.clone(),
+                    span: expr.span,
                 }),
             }
         }),
@@ -227,7 +225,7 @@ pub fn env<'src>() -> Env<'src> {
                 (Value::Unit, Value::Unit) => Ok(Value::Int(1)),
                 _ => Err(Error {
                     msg: format!("Cannot compare {a} and {b} for equality"),
-                    span: expr.1.clone(),
+                    span: expr.span,
                 }),
             }
         }),
@@ -238,7 +236,7 @@ pub fn env<'src>() -> Env<'src> {
                 (Value::Unit, Value::Unit) => Ok(Value::Int(0)),
                 _ => Err(Error {
                     msg: format!("Cannot compare {a} and {b} for inequality"),
-                    span: expr.1.clone(),
+                    span: expr.span,
                 }),
             }
         }),
@@ -248,7 +246,7 @@ pub fn env<'src>() -> Env<'src> {
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a > b { 1 } else { 0 })),
                 _ => Err(Error {
                     msg: format!("Cannot compare {a} and {b} for greater than"),
-                    span: expr.1.clone(),
+                    span: expr.span,
                 }),
             }
         }),
@@ -258,7 +256,7 @@ pub fn env<'src>() -> Env<'src> {
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a < b { 1 } else { 0 })),
                 _ => Err(Error {
                     msg: format!("Cannot compare {a} and {b} for less than"),
-                    span: expr.1.clone(),
+                    span: expr.span,
                 }),
             }
         }),
@@ -268,7 +266,7 @@ pub fn env<'src>() -> Env<'src> {
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a >= b { 1 } else { 0 })),
                 _ => Err(Error {
                     msg: format!("Cannot compare {a} and {b} for greater than or equal"),
-                    span: expr.1.clone(),
+                    span: expr.span,
                 }),
             }
         }),
@@ -278,7 +276,7 @@ pub fn env<'src>() -> Env<'src> {
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a <= b { 1 } else { 0 })),
                 _ => Err(Error {
                     msg: format!("Cannot compare {a} and {b} for less than or equal"),
-                    span: expr.1.clone(),
+                    span: expr.span,
                 }),
             }
         }),
@@ -291,6 +289,7 @@ pub fn env<'src>() -> Env<'src> {
 #[cfg(test)]
 mod tests {
     use ariadne::{Label, Report, ReportKind, sources};
+    use chumsky::prelude::*;
 
     use super::*;
     use crate::interp;
@@ -303,7 +302,66 @@ mod tests {
         func: Spanned<Expr<'src>>,
         args: Vec<Spanned<Expr<'src>>>,
     ) -> Spanned<Expr<'src>> {
-        spanned(Expr::Call(Box::new(func), spanned(args)))
+        spanned(Expr::Call(Call {
+            callee: Box::new(func),
+            args: spanned(args),
+        }))
+    }
+
+    fn var(name: &str, span: std::ops::Range<usize>) -> Spanned<Expr<'_>> {
+        Spanned::new(Expr::Var(name), span)
+    }
+
+    fn op<'src>(
+        lhs: Spanned<Expr<'src>>,
+        op: Spanned<Expr<'src>>,
+        rhs: Spanned<Expr<'src>>,
+    ) -> Expr<'src> {
+        Expr::Op(Op {
+            lhs: Box::new(lhs),
+            op: Box::new(op),
+            rhs: Box::new(rhs),
+        })
+    }
+
+    fn binding<'src>(
+        name: &'src str,
+        init: Spanned<Expr<'src>>,
+        body: Spanned<Expr<'src>>,
+    ) -> Expr<'src> {
+        Expr::Let(Let {
+            fixity: None,
+            name,
+            init: Box::new(init),
+            body: Box::new(body),
+        })
+    }
+
+    fn function<'src>(params: Spanned<Vec<&'src str>>, body: Spanned<Expr<'src>>) -> Expr<'src> {
+        Expr::Fn(FnExpr {
+            params,
+            body: Rc::new(body),
+        })
+    }
+
+    fn case<'src>(
+        scrutinee: Spanned<Expr<'src>>,
+        arms: Spanned<Vec<CaseArm<'src, Expr<'src>>>>,
+    ) -> Expr<'src> {
+        Expr::Case(Case {
+            scrutinee: Box::new(scrutinee),
+            arms,
+        })
+    }
+
+    fn arm<'src>(
+        patt: Spanned<Patt<'src>>,
+        body: Spanned<Expr<'src>>,
+    ) -> CaseArm<'src, Expr<'src>> {
+        CaseArm {
+            patt,
+            body: Box::new(body),
+        }
     }
 
     fn eel_builtin<'src>(
@@ -320,7 +378,7 @@ mod tests {
                     members: Box::new([ClosureDef {
                         rec_name: None,
                         params,
-                        body: Rc::new((body.0, (0..0).into())),
+                        body: Rc::new(Spanned::new(body.value, 0..0)),
                     }]),
                 }),
                 member: 0,
@@ -336,12 +394,15 @@ mod tests {
         let infix_span = (10..10 + name.len()).into();
         let prefix_span = (0..name.len()).into();
         let args = vec![spanned(Expr::Lit(a)), spanned(Expr::Lit(b))];
-        let infix = spanned(Expr::Op(
-            Box::new(args[0].clone()),
-            Box::new((Expr::Var(name), infix_span)),
-            Box::new(args[1].clone()),
+        let infix = spanned(op(
+            args[0].clone(),
+            Spanned::new(Expr::Var(name), infix_span),
+            args[1].clone(),
         ));
-        let prefix = call(call((Expr::Var(name), prefix_span), args), vec![]);
+        let prefix = call(
+            call(Spanned::new(Expr::Var(name), prefix_span), args),
+            vec![],
+        );
         [(infix, infix_span), (prefix, prefix_span)]
     }
 
@@ -373,11 +434,7 @@ mod tests {
     #[test]
     fn test_eel_builtin_marks_internal_body() {
         let (name, value) = builtin!("b" expr env [a, b] in "a + b");
-        let expected = spanned(Expr::Op(
-            Box::new((Expr::Var("a"), (0..1).into())),
-            Box::new((Expr::Var("+"), (2..3).into())),
-            Box::new((Expr::Var("b"), (4..5).into())),
-        ));
+        let expected = spanned(op(var("a", 0..1), var("+", 2..3), var("b", 4..5)));
         assert_eq!(name, "b");
         assert_eq!(
             value,
@@ -398,14 +455,14 @@ mod tests {
 
     #[test]
     fn test_eel_builtin_errors_use_infix_and_prefix_call_sites() {
-        let infix = spanned(Expr::Op(
-            Box::new(spanned(Expr::Lit(Value::Int(1)))),
-            Box::new((Expr::Var("b"), (2..3).into())),
-            Box::new(spanned(Expr::Lit(Value::Int(2)))),
+        let infix = spanned(op(
+            spanned(Expr::Lit(Value::Int(1))),
+            var("b", 2..3),
+            spanned(Expr::Lit(Value::Int(2))),
         ));
         let prefix = call(
             call(
-                (Expr::Var("b"), (0..1).into()),
+                var("b", 0..1),
                 vec![
                     spanned(Expr::Lit(Value::Int(1))),
                     spanned(Expr::Lit(Value::Int(2))),
@@ -414,14 +471,14 @@ mod tests {
             vec![],
         );
         for (src, expr, span) in [("1 b 2", infix, 2..3), ("b(1, 2)()", prefix, 0..1)] {
-            let body = spanned(Expr::Case(
-                Box::new((Expr::Var("a"), (5..6).into())),
-                (
-                    vec![(
-                        (Patt::Var("_"), (9..10).into()),
-                        Box::new((Expr::Var("missing_internal"), (14..30).into())),
+            let body = spanned(case(
+                var("a", 5..6),
+                Spanned::new(
+                    vec![arm(
+                        Spanned::new(Patt::Var("_"), 9..10),
+                        var("missing_internal", 14..30),
                     )],
-                    (7..32).into(),
+                    7..32,
                 ),
             ));
             assert_call_error(
@@ -436,14 +493,14 @@ mod tests {
 
     #[test]
     fn test_eel_builtin_errors_use_utf8_call_site_boundaries() {
-        let infix = spanned(Expr::Op(
-            Box::new(spanned(Expr::Lit(Value::Int(1)))),
-            Box::new((Expr::Var("🦀"), (2..6).into())),
-            Box::new(spanned(Expr::Lit(Value::Int(2)))),
+        let infix = spanned(op(
+            spanned(Expr::Lit(Value::Int(1))),
+            var("🦀", 2..6),
+            spanned(Expr::Lit(Value::Int(2))),
         ));
         let prefix = call(
             call(
-                (Expr::Var("🦀"), (0..4).into()),
+                var("🦀", 0..4),
                 vec![
                     spanned(Expr::Lit(Value::Int(1))),
                     spanned(Expr::Lit(Value::Int(2))),
@@ -459,11 +516,7 @@ mod tests {
                 eel_builtin(
                     "🦀",
                     vec!["a", "b"],
-                    spanned(Expr::Op(
-                        Box::new((Expr::Var("a"), (0..1).into())),
-                        Box::new((Expr::Var("bad"), (2..5).into())),
-                        Box::new((Expr::Var("b"), (6..7).into())),
-                    )),
+                    spanned(op(var("a", 0..1), var("bad", 2..5), var("b", 6..7))),
                 ),
                 span.into(),
                 "Variable `bad` not found",
@@ -474,53 +527,53 @@ mod tests {
     #[test]
     fn test_eel_builtin_remaps_every_ast_span() {
         fn body(span: Span) -> Spanned<Expr<'static>> {
-            let var = |name| (Expr::Var(name), span);
-            let tail = (
-                Patt::Struct("tail", (vec![(Patt::Var("rest"), span)], span)),
-                span,
-            );
-            let pair = (
-                Patt::Struct("pair", (vec![(Patt::Var("head"), span), tail], span)),
-                span,
-            );
-            let sum = (
-                Expr::Op(
-                    Box::new(var("y")),
-                    Box::new(var("+")),
-                    Box::new(var("head")),
-                ),
-                span,
-            );
-            let case = (
-                Expr::Case(
-                    Box::new(var("x")),
-                    (
+            let var = |name| Spanned::new(Expr::Var(name), span);
+            let patt = |value| Spanned::new(value, span);
+            let tail = patt(Patt::Struct(StructPatt {
+                name: "tail",
+                args: Spanned::new(vec![patt(Patt::Var("rest"))], span),
+            }));
+            let pair = patt(Patt::Struct(StructPatt {
+                name: "pair",
+                args: Spanned::new(vec![patt(Patt::Var("head")), tail], span),
+            }));
+            let sum = Spanned::new(op(var("y"), var("+"), var("head")), span);
+            let case = Spanned::new(
+                case(
+                    var("x"),
+                    Spanned::new(
                         vec![
-                            (pair, Box::new(sum)),
-                            (
-                                (Patt::Lit(Value::Int(0)), span),
-                                Box::new((Expr::Lit(Value::Int(1)), span)),
+                            arm(pair, sum),
+                            arm(
+                                patt(Patt::Lit(Value::Int(0))),
+                                Spanned::new(Expr::Lit(Value::Int(1)), span),
                             ),
-                            ((Patt::Var("_"), span), Box::new(var("y"))),
+                            arm(patt(Patt::Var("_")), var("y")),
                         ],
                         span,
                     ),
                 ),
                 span,
             );
-            let function = (Expr::Fn((vec!["x", "y"], span), Rc::new(case)), span);
-            let apply = (
-                Expr::Call(Box::new(var("combine")), (vec![var("a"), var("b")], span)),
+            let function = Spanned::new(function(Spanned::new(vec!["x", "y"], span), case), span);
+            let apply = Spanned::new(
+                Expr::Call(Call {
+                    callee: Box::new(var("combine")),
+                    args: Spanned::new(vec![var("a"), var("b")], span),
+                }),
                 span,
             );
-            let force = (Expr::Call(Box::new(apply), (vec![], span)), span);
-            (
-                Expr::Let(None, "combine", Box::new(function), Box::new(force)),
+            let force = Spanned::new(
+                Expr::Call(Call {
+                    callee: Box::new(apply),
+                    args: Spanned::new(vec![], span),
+                }),
                 span,
-            )
+            );
+            Spanned::new(binding("combine", function, force), span)
         }
         let mut original = body((50..60).into());
-        original.1 = (0..0).into();
+        original.span = (0..0).into();
         let original = Rc::new(original);
         let call_span = (13..17).into();
 
@@ -528,31 +581,31 @@ mod tests {
             *body_at_call_site(Rc::clone(&original), call_span),
             body(call_span),
         );
-        assert_eq!(original.1, (0..0).into());
+        assert_eq!(original.span, (0..0).into());
         for expr in [
             Expr::Err,
             Expr::Lit(Value::Unit),
             Expr::Builtin(|_, _| Ok(Value::Unit)),
         ] {
             let remapped = body_at_call_site(Rc::new(spanned(expr)), call_span);
-            assert_eq!(remapped.1, call_span);
+            assert_eq!(remapped.span, call_span);
         }
     }
 
     #[test]
     fn test_user_function_body_spans_are_preserved() {
-        let body = Rc::new((
-            Expr::Fn(
-                (vec!["x"], (2..5).into()),
-                Rc::new((
-                    Expr::Call(
-                        Box::new((Expr::Var("missing"), (8..15).into())),
-                        (vec![(Expr::Var("x"), (16..17).into())], (15..18).into()),
-                    ),
-                    (8..18).into(),
-                )),
+        let body = Rc::new(Spanned::new(
+            function(
+                Spanned::new(vec!["x"], 2..5),
+                Spanned::new(
+                    Expr::Call(Call {
+                        callee: Box::new(var("missing", 8..15)),
+                        args: Spanned::new(vec![var("x", 16..17)], 15..18),
+                    }),
+                    8..18,
+                ),
             ),
-            (0..20).into(),
+            0..20,
         ));
         let call_body = body_at_call_site(Rc::clone(&body), (30..34).into());
         assert!(Rc::ptr_eq(&call_body, &body));
@@ -560,27 +613,23 @@ mod tests {
 
     #[test]
     fn test_returned_eel_builtin_function_keeps_original_call_site() {
-        let expr = spanned(Expr::Let(
-            None,
+        let expr = spanned(binding(
             "f",
-            Box::new(call(call((Expr::Var("b"), (8..9).into()), vec![]), vec![])),
-            Box::new(call(
-                call(
-                    (Expr::Var("f"), (14..15).into()),
-                    vec![spanned(Expr::Lit(Value::Int(0)))],
-                ),
+            call(call(var("b", 8..9), vec![]), vec![]),
+            call(
+                call(var("f", 14..15), vec![spanned(Expr::Lit(Value::Int(0)))]),
                 vec![],
-            )),
+            ),
         ));
-        let body = spanned(Expr::Fn(
-            (vec!["x"], (2..5).into()),
-            Rc::new((
-                Expr::Call(
-                    Box::new((Expr::Var("missing_internal"), (8..24).into())),
-                    (vec![(Expr::Var("x"), (25..26).into())], (24..27).into()),
-                ),
-                (8..27).into(),
-            )),
+        let body = spanned(function(
+            Spanned::new(vec!["x"], 2..5),
+            Spanned::new(
+                Expr::Call(Call {
+                    callee: Box::new(var("missing_internal", 8..24)),
+                    args: Spanned::new(vec![var("x", 25..26)], 24..27),
+                }),
+                8..27,
+            ),
         ));
         assert_call_error(
             "let f = b()() f(0)()",
@@ -593,44 +642,43 @@ mod tests {
 
     #[test]
     fn test_eel_builtin_calls_do_not_reuse_previous_call_spans() {
-        let expr = spanned(Expr::Let(
-            None,
+        let expr = spanned(binding(
             "_",
-            Box::new(call(
+            call(
                 call(
-                    (Expr::Var("b"), (8..9).into()),
+                    var("b", 8..9),
                     vec![
                         spanned(Expr::Lit(Value::Int(0))),
                         spanned(Expr::Lit(Value::Int(2))),
                     ],
                 ),
                 vec![],
-            )),
-            Box::new(call(
+            ),
+            call(
                 call(
-                    (Expr::Var("b"), (18..19).into()),
+                    var("b", 18..19),
                     vec![
                         spanned(Expr::Lit(Value::Int(1))),
                         spanned(Expr::Lit(Value::Int(2))),
                     ],
                 ),
                 vec![],
-            )),
+            ),
         ));
-        let body = spanned(Expr::Case(
-            Box::new((Expr::Var("a"), (5..6).into())),
-            (
+        let body = spanned(case(
+            var("a", 5..6),
+            Spanned::new(
                 vec![
-                    (
-                        (Patt::Lit(Value::Int(0)), (9..10).into()),
-                        Box::new((Expr::Lit(Value::Int(0)), (14..15).into())),
+                    arm(
+                        Spanned::new(Patt::Lit(Value::Int(0)), 9..10),
+                        Spanned::new(Expr::Lit(Value::Int(0)), 14..15),
                     ),
-                    (
-                        (Patt::Var("_"), (16..17).into()),
-                        Box::new((Expr::Var("missing_internal"), (21..37).into())),
+                    arm(
+                        Spanned::new(Patt::Var("_"), 16..17),
+                        var("missing_internal", 21..37),
                     ),
                 ],
-                (7..39).into(),
+                7..39,
             ),
         ));
         assert_call_error(
@@ -764,53 +812,46 @@ mod tests {
         let overflow = applications("+", Value::Int(i64::MAX), Value::Int(1))[0]
             .0
             .clone();
-        let deferred = spanned(Expr::Let(
-            None,
+        let deferred = spanned(binding(
             "sum",
-            Box::new(call(
-                (Expr::Var("+"), (5..6).into()),
-                vec![max.clone(), one.clone()],
-            )),
-            Box::new(call(spanned(Expr::Var("sum")), vec![])),
+            call(var("+", 5..6), vec![max.clone(), one.clone()]),
+            call(spanned(Expr::Var("sum")), vec![]),
         ));
-        let variables = spanned(Expr::Let(
-            None,
+        let variables = spanned(binding(
             "x",
-            Box::new(max.clone()),
-            Box::new(spanned(Expr::Let(
-                None,
+            max.clone(),
+            spanned(binding(
                 "y",
-                Box::new(one),
-                Box::new(spanned(Expr::Op(
-                    Box::new(spanned(Expr::Var("x"))),
-                    Box::new((Expr::Var("+"), (10..11).into())),
-                    Box::new(spanned(Expr::Var("y"))),
-                ))),
-            ))),
-        ));
-        let function = spanned(Expr::Let(
-            None,
-            "f",
-            Box::new((
-                Expr::Fn(
-                    spanned(vec!["x"]),
-                    Rc::new((
-                        Expr::Op(
-                            Box::new(spanned(Expr::Var("x"))),
-                            Box::new((Expr::Var("*"), (20..21).into())),
-                            Box::new(spanned(Expr::Lit(Value::Int(2)))),
-                        ),
-                        (18..23).into(),
-                    )),
-                ),
-                (10..25).into(),
+                one,
+                spanned(op(
+                    spanned(Expr::Var("x")),
+                    var("+", 10..11),
+                    spanned(Expr::Var("y")),
+                )),
             )),
-            Box::new(call(call(spanned(Expr::Var("f")), vec![max]), vec![])),
         ));
-        let nested = spanned(Expr::Op(
-            Box::new(spanned(Expr::Lit(Value::Int(0)))),
-            Box::new((Expr::Var("+"), (2..3).into())),
-            Box::new(overflow),
+        let function = spanned(binding(
+            "f",
+            Spanned::new(
+                function(
+                    spanned(vec!["x"]),
+                    Spanned::new(
+                        op(
+                            spanned(Expr::Var("x")),
+                            var("*", 20..21),
+                            spanned(Expr::Lit(Value::Int(2))),
+                        ),
+                        18..23,
+                    ),
+                ),
+                10..25,
+            ),
+            call(call(spanned(Expr::Var("f")), vec![max]), vec![]),
+        ));
+        let nested = spanned(op(
+            spanned(Expr::Lit(Value::Int(0))),
+            var("+", 2..3),
+            overflow,
         ));
         for expr in [variables, deferred, function, nested] {
             let err = interp::eval(&expr, env()).unwrap_err();
@@ -906,15 +947,26 @@ mod tests {
             }),
             member: 0,
         });
-        let args: StructArgs<'_> =
-            Rc::from([("a", Rc::new(Value::Int(1))), ("b", Rc::new(Value::Int(2)))]);
-        let applied_env = args.iter().cloned().collect();
-        let deferred = Value::Struct(
-            Some("+"),
-            Rc::new(spanned(Expr::Lit(Value::Int(3)))),
+        let args: StructArgs<'_> = Rc::from([
+            StructArg {
+                param: "a",
+                value: Rc::new(Value::Int(1)),
+            },
+            StructArg {
+                param: "b",
+                value: Rc::new(Value::Int(2)),
+            },
+        ]);
+        let applied_env = args
+            .iter()
+            .map(|arg| (arg.param, Rc::clone(&arg.value)))
+            .collect();
+        let deferred = Value::Struct(Struct {
+            name: Some("+"),
+            body: Rc::new(spanned(Expr::Lit(Value::Int(3)))),
             args,
             applied_env,
-        );
+        });
         for (a, b) in [
             (Value::Int(1), Value::Float(1.0)),
             (Value::Float(1.0), Value::Int(1)),
@@ -956,8 +1008,8 @@ mod tests {
             );
             let result = interp::eval(&expr, env());
             assert!(
-                matches!(result, Ok(Value::Struct(Some("!="), _, ref args, _))
-                    if args.iter().map(|(name, v)| (*name, v.as_ref()))
+                matches!(result, Ok(Value::Struct(Struct { name: Some("!="), ref args, .. }))
+                    if args.iter().map(|arg| (arg.param, arg.value.as_ref()))
                         .eq([("a", &Value::Int(1)), ("b", &value)])),
                 "{expr:?}: {result:?}"
             );
@@ -966,19 +1018,14 @@ mod tests {
 
     #[test]
     fn test_inequality_does_not_depend_on_shadowed_equality() {
-        let equality = spanned(Expr::Fn(
+        let equality = spanned(function(
             spanned(vec!["a", "b"]),
-            Rc::new(spanned(Expr::Lit(Value::Int(0)))),
+            spanned(Expr::Lit(Value::Int(0))),
         ));
         let inequality = applications("!=", Value::Int(1), Value::Int(1))[0]
             .0
             .clone();
-        let expr = spanned(Expr::Let(
-            None,
-            "==",
-            Box::new(equality),
-            Box::new(inequality),
-        ));
+        let expr = spanned(binding("==", equality, inequality));
         assert_eq!(interp::eval(&expr, env()), Ok(Value::Int(0)));
     }
 }

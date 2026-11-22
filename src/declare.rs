@@ -1,7 +1,7 @@
 pub use std::fmt;
 use std::rc::Rc;
 
-use chumsky::prelude::*;
+use chumsky::span::SimpleSpan;
 
 pub use fixity::*;
 pub use interp::*;
@@ -9,7 +9,29 @@ pub use lex::*;
 pub use parse::*;
 
 pub type Span = SimpleSpan;
-pub type Spanned<T> = (T, Span);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Spanned<T> {
+    pub value: T,
+    pub span: Span,
+}
+
+impl<T> Spanned<T> {
+    pub fn new(value: T, span: impl Into<Span>) -> Self {
+        Self {
+            value,
+            span: span.into(),
+        }
+    }
+
+    pub fn as_parts(&self) -> (&T, &Span) {
+        (&self.value, &self.span)
+    }
+
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Spanned<U> {
+        Spanned::new(f(self.value), self.span)
+    }
+}
 
 #[allow(dead_code)] // trait only used by tests
 pub trait SpanlessPartialEq {
@@ -18,7 +40,13 @@ pub trait SpanlessPartialEq {
 
 impl<T: SpanlessPartialEq> SpanlessPartialEq for Spanned<T> {
     fn spanless_eq(&self, other: &Self) -> bool {
-        self.0.spanless_eq(&other.0)
+        self.value.spanless_eq(&other.value)
+    }
+}
+
+impl<T: SpanlessPartialEq> SpanlessPartialEq for Box<T> {
+    fn spanless_eq(&self, other: &Self) -> bool {
+        self.as_ref().spanless_eq(other.as_ref())
     }
 }
 
@@ -98,23 +126,29 @@ mod lex {
 mod parse {
     use super::*;
 
-    fn fmt_fixity(f: &mut fmt::Formatter<'_>, fixity: Option<(OpAssoc, i64)>) -> fmt::Result {
+    pub(super) fn fmt_fixity(f: &mut fmt::Formatter<'_>, fixity: Option<Fixity>) -> fmt::Result {
         match fixity {
-            Some((OpAssoc::Left, prec)) => write!(f, " opl {prec}"),
-            Some((OpAssoc::Right, prec)) => write!(f, " opr {prec}"),
+            Some(Fixity {
+                assoc: OpAssoc::Left,
+                precedence,
+            }) => write!(f, " opl {precedence}"),
+            Some(Fixity {
+                assoc: OpAssoc::Right,
+                precedence,
+            }) => write!(f, " opr {precedence}"),
             None => Ok(()),
         }
     }
 
-    fn fmt_let(
+    pub(super) fn fmt_let(
         f: &mut fmt::Formatter<'_>,
-        fixity: Option<(OpAssoc, i64)>,
+        fixity: Option<Fixity>,
         name: &str,
-        assign: &SyntaxExpr<'_>,
+        init: &impl fmt::Display,
     ) -> fmt::Result {
         write!(f, "let")?;
         fmt_fixity(f, fixity)?;
-        write!(f, " {name} = {assign}")
+        write!(f, " {name} = {init}")
     }
 
     fn fmt_let_rec<'src>(
@@ -127,9 +161,9 @@ mod parse {
             write!(
                 f,
                 " {} = fn({}) {{ {} }}",
-                binding.name.0,
-                binding.params.0.join(", "),
-                binding.body.0,
+                binding.name.value,
+                binding.params.value.join(", "),
+                binding.body.value,
             )?;
         }
         write!(f, " }}")
@@ -138,32 +172,150 @@ mod parse {
     #[derive(Debug, Clone, PartialEq)]
     pub struct RecFn<'src, Body> {
         pub name: Spanned<&'src str>,
-        pub fixity: Option<(OpAssoc, i64)>,
+        pub fixity: Option<Fixity>,
         pub params: Spanned<Vec<&'src str>>,
         pub body: Body,
     }
 
     impl<Body: SpanlessPartialEq> SpanlessPartialEq for RecFn<'_, Body> {
         fn spanless_eq(&self, other: &Self) -> bool {
-            self.name.0 == other.name.0
+            self.name.value == other.name.value
                 && self.fixity == other.fixity
                 && self.params.spanless_eq(&other.params)
                 && self.body.spanless_eq(&other.body)
         }
     }
 
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Call<E> {
+        pub callee: Box<Spanned<E>>,
+        pub args: Spanned<Vec<Spanned<E>>>,
+    }
+
+    impl<E: SpanlessPartialEq> SpanlessPartialEq for Call<E> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.callee.spanless_eq(&other.callee) && self.args.spanless_eq(&other.args)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct FnExpr<'src, Body> {
+        pub params: Spanned<Vec<&'src str>>,
+        pub body: Body,
+    }
+
+    impl<Body: SpanlessPartialEq> SpanlessPartialEq for FnExpr<'_, Body> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.params.spanless_eq(&other.params) && self.body.spanless_eq(&other.body)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Case<'src, E> {
+        pub scrutinee: Box<Spanned<E>>,
+        pub arms: Spanned<Vec<CaseArm<'src, E>>>,
+    }
+
+    impl<E: SpanlessPartialEq> SpanlessPartialEq for Case<'_, E> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.scrutinee.spanless_eq(&other.scrutinee) && self.arms.spanless_eq(&other.arms)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct CaseArm<'src, E> {
+        pub patt: Spanned<Patt<'src>>,
+        pub body: Box<Spanned<E>>,
+    }
+
+    impl<E: SpanlessPartialEq> SpanlessPartialEq for CaseArm<'_, E> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.patt.spanless_eq(&other.patt) && self.body.spanless_eq(&other.body)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Let<'src, E> {
+        pub fixity: Option<Fixity>,
+        pub name: &'src str,
+        pub init: Box<Spanned<E>>,
+        pub body: Box<Spanned<E>>,
+    }
+
+    impl<E: SpanlessPartialEq> SpanlessPartialEq for Let<'_, E> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.fixity == other.fixity
+                && self.name == other.name
+                && self.init.spanless_eq(&other.init)
+                && self.body.spanless_eq(&other.body)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct LetRec<'src, E, FnBody> {
+        pub bindings: Vec<RecFn<'src, FnBody>>,
+        pub body: Box<Spanned<E>>,
+    }
+
+    impl<E: SpanlessPartialEq, FnBody: SpanlessPartialEq> SpanlessPartialEq for LetRec<'_, E, FnBody> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.bindings.spanless_eq(&other.bindings) && self.body.spanless_eq(&other.body)
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct LetBinding<'src> {
+        pub fixity: Option<Fixity>,
+        pub name: &'src str,
+        pub init: Spanned<SyntaxExpr<'src>>,
+    }
+
+    impl SpanlessPartialEq for LetBinding<'_> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.fixity == other.fixity
+                && self.name == other.name
+                && self.init.spanless_eq(&other.init)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Ops<'src> {
+        pub first: Box<Spanned<SyntaxExpr<'src>>>,
+        pub rest: Vec<OpStep<'src>>,
+    }
+
+    impl SpanlessPartialEq for Ops<'_> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.first.spanless_eq(&other.first) && self.rest.spanless_eq(&other.rest)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct OpStep<'src> {
+        pub op: Spanned<SyntaxExpr<'src>>,
+        pub rhs: Spanned<SyntaxExpr<'src>>,
+    }
+
+    impl SpanlessPartialEq for OpStep<'_> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.op.spanless_eq(&other.op) && self.rhs.spanless_eq(&other.rhs)
+        }
+    }
+
     #[derive(Debug)]
     pub enum ReplItem<'src> {
         Expr(Spanned<SyntaxExpr<'src>>),
-        Let(Option<(OpAssoc, i64)>, &'src str, Spanned<SyntaxExpr<'src>>),
+        Let(LetBinding<'src>),
         LetRec(Vec<RecFn<'src, Spanned<SyntaxExpr<'src>>>>),
     }
 
     impl fmt::Display for ReplItem<'_> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
-                Self::Expr(expr) => write!(f, "{}", expr.0),
-                Self::Let(fixity, name, assign) => fmt_let(f, *fixity, name, &assign.0),
+                Self::Expr(expr) => write!(f, "{}", expr.value),
+                Self::Let(LetBinding { fixity, name, init }) => {
+                    fmt_let(f, *fixity, name, &init.value)
+                }
                 Self::LetRec(bindings) => fmt_let_rec(f, bindings),
             }
         }
@@ -173,9 +325,7 @@ mod parse {
         fn spanless_eq(&self, other: &Self) -> bool {
             match (self, other) {
                 (Self::Expr(l), Self::Expr(r)) => l.spanless_eq(r),
-                (Self::Let(l_spec, l_name, l_assign), Self::Let(r_spec, r_name, r_assign)) => {
-                    l_spec == r_spec && l_name == r_name && l_assign.spanless_eq(r_assign)
-                }
+                (Self::Let(l), Self::Let(r)) => l.spanless_eq(r),
                 (Self::LetRec(l), Self::LetRec(r)) => l.spanless_eq(r),
                 _ => false,
             }
@@ -185,75 +335,75 @@ mod parse {
     #[derive(Debug, Clone, PartialEq)]
     pub enum SyntaxExpr<'src> {
         Atom(Expr<'src>),
-        Call(Box<Spanned<Self>>, Spanned<Vec<Spanned<Self>>>),
-        Fn(Spanned<Vec<&'src str>>, Box<Spanned<Self>>),
-        Case(
-            Box<Spanned<Self>>,
-            Spanned<Vec<(Spanned<Patt<'src>>, Box<Spanned<Self>>)>>,
-        ),
-        Ops(Box<Spanned<Self>>, Vec<(Spanned<Self>, Spanned<Self>)>),
-        Let(
-            Option<(OpAssoc, i64)>,
-            &'src str,
-            Box<Spanned<Self>>,
-            Box<Spanned<Self>>,
-        ),
-        LetRec(Vec<RecFn<'src, Spanned<Self>>>, Box<Spanned<Self>>),
+        Call(Call<Self>),
+        Fn(FnExpr<'src, Box<Spanned<Self>>>),
+        Case(Case<'src, Self>),
+        Ops(Ops<'src>),
+        Let(Let<'src, Self>),
+        LetRec(LetRec<'src, Self, Spanned<Self>>),
     }
 
     impl<'src> fmt::Display for SyntaxExpr<'src> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 SyntaxExpr::Atom(expr) => write!(f, "{expr}"),
-                SyntaxExpr::Call(func, args) => write!(
+                SyntaxExpr::Call(Call { callee, args }) => write!(
                     f,
                     "{}({})",
-                    func.0,
-                    args.0
+                    callee.value,
+                    args.value
                         .iter()
-                        .map(|e| e.0.to_string())
+                        .map(|e| e.value.to_string())
                         .collect::<Vec<_>>()
                         .join(", "),
                 ),
-                SyntaxExpr::Fn(params, body) => {
+                SyntaxExpr::Fn(FnExpr { params, body }) => {
                     write!(
                         f,
                         "fn({}) {{{}}}",
                         params
-                            .0
+                            .value
                             .iter()
                             .map(|p| p.to_string())
                             .collect::<Vec<_>>()
                             .join(", "),
-                        body.0,
+                        body.value,
                     )
                 }
-                SyntaxExpr::Case(expr, arms) => {
+                SyntaxExpr::Case(Case { scrutinee, arms }) => {
                     write!(
                         f,
                         "case {} {{ {} }}",
-                        expr.0,
-                        arms.0
+                        scrutinee.value,
+                        arms.value
                             .iter()
-                            .map(|(patt, body)| format!("{} => {}", patt.0, body.0))
+                            .map(|CaseArm { patt, body }| format!(
+                                "{} => {}",
+                                patt.value, body.value
+                            ))
                             .collect::<Vec<_>>()
                             .join(", "),
                     )
                 }
-                SyntaxExpr::Ops(left, ops) => {
-                    let mut result = left.0.to_string();
-                    for (op, right) in ops {
-                        result.push_str(&format!(" {} {}", op.0, right.0));
+                SyntaxExpr::Ops(Ops { first, rest }) => {
+                    let mut result = first.value.to_string();
+                    for OpStep { op, rhs } in rest {
+                        result.push_str(&format!(" {} {}", op.value, rhs.value));
                     }
                     write!(f, "({result})")
                 }
-                SyntaxExpr::Let(op_spec, ident, assign, body) => {
-                    fmt_let(f, *op_spec, ident, &assign.0)?;
-                    write!(f, " {}", body.0)
+                SyntaxExpr::Let(Let {
+                    fixity,
+                    name,
+                    init,
+                    body,
+                }) => {
+                    fmt_let(f, *fixity, name, &init.value)?;
+                    write!(f, " {}", body.value)
                 }
-                SyntaxExpr::LetRec(bindings, body) => {
+                SyntaxExpr::LetRec(LetRec { bindings, body }) => {
                     fmt_let_rec(f, bindings)?;
-                    write!(f, " {}", body.0)
+                    write!(f, " {}", body.value)
                 }
             }
         }
@@ -263,44 +413,12 @@ mod parse {
         fn spanless_eq(&self, other: &Self) -> bool {
             match (self, other) {
                 (SyntaxExpr::Atom(l), SyntaxExpr::Atom(r)) => l.spanless_eq(r),
-                (SyntaxExpr::Call(l_func, l_args), SyntaxExpr::Call(r_func, r_args)) => {
-                    l_func.spanless_eq(r_func) && l_args.spanless_eq(r_args)
-                }
-                (SyntaxExpr::Fn(l_params, l_body), SyntaxExpr::Fn(r_params, r_body)) => {
-                    l_params.spanless_eq(r_params) && l_body.spanless_eq(r_body)
-                }
-                (SyntaxExpr::Case(l_expr, l_arms), SyntaxExpr::Case(r_expr, r_arms)) => {
-                    l_expr.spanless_eq(r_expr)
-                        && l_arms.0.len() == r_arms.0.len()
-                        && l_arms.0.iter().zip(&r_arms.0).all(
-                            |((l_patt, l_body), (r_patt, r_body))| {
-                                l_patt.spanless_eq(r_patt) && l_body.spanless_eq(r_body)
-                            },
-                        )
-                }
-                (SyntaxExpr::Ops(l_first, l_rest), SyntaxExpr::Ops(r_first, r_rest)) => {
-                    l_first.spanless_eq(r_first)
-                        && l_rest.len() == r_rest.len()
-                        && l_rest
-                            .iter()
-                            .zip(r_rest)
-                            .all(|((l_op, l_rhs), (r_op, r_rhs))| {
-                                l_op.spanless_eq(r_op) && l_rhs.spanless_eq(r_rhs)
-                            })
-                }
-                (
-                    SyntaxExpr::Let(l_spec, l_name, l_assign, l_body),
-                    SyntaxExpr::Let(r_spec, r_name, r_assign, r_body),
-                ) => {
-                    l_spec == r_spec
-                        && l_name == r_name
-                        && l_assign.spanless_eq(r_assign)
-                        && l_body.spanless_eq(r_body)
-                }
-                (
-                    SyntaxExpr::LetRec(l_bindings, l_body),
-                    SyntaxExpr::LetRec(r_bindings, r_body),
-                ) => l_bindings.spanless_eq(r_bindings) && l_body.spanless_eq(r_body),
+                (SyntaxExpr::Call(l), SyntaxExpr::Call(r)) => l.spanless_eq(r),
+                (SyntaxExpr::Fn(l), SyntaxExpr::Fn(r)) => l.spanless_eq(r),
+                (SyntaxExpr::Case(l), SyntaxExpr::Case(r)) => l.spanless_eq(r),
+                (SyntaxExpr::Ops(l), SyntaxExpr::Ops(r)) => l.spanless_eq(r),
+                (SyntaxExpr::Let(l), SyntaxExpr::Let(r)) => l.spanless_eq(r),
+                (SyntaxExpr::LetRec(l), SyntaxExpr::LetRec(r)) => l.spanless_eq(r),
                 _ => false,
             }
         }
@@ -322,10 +440,21 @@ mod parse {
         }
     }
 
-    pub type OpSpec<'src> = (&'src str, OpAssoc, i64);
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct Fixity {
+        pub assoc: OpAssoc,
+        pub precedence: i64,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct OpSpec<'src> {
+        pub name: &'src str,
+        pub fixity: Fixity,
+    }
 }
 
 mod fixity {
+    use super::parse::{fmt_fixity, fmt_let};
     use super::*;
 
     #[derive(Debug, Clone, PartialEq)]
@@ -355,17 +484,20 @@ mod fixity {
     }
 
     #[derive(Debug, Clone, PartialEq)]
+    pub struct Struct<'src> {
+        pub name: Option<&'src str>,
+        pub body: Rc<Spanned<Expr<'src>>>,
+        pub args: StructArgs<'src>,
+        pub applied_env: Env<'src>,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
     pub enum Value<'src> {
         Unit,
         Float(f64),
         Int(i64),
         Closure(Closure<'src>),
-        Struct(
-            Option<&'src str>,
-            Rc<Spanned<Expr<'src>>>,
-            StructArgs<'src>,
-            Env<'src>,
-        ),
+        Struct(Struct<'src>),
     }
 
     impl<'src> fmt::Display for Value<'src> {
@@ -396,19 +528,21 @@ mod fixity {
                             .map(|p| p.to_string())
                             .collect::<Vec<_>>()
                             .join(", "),
-                        body.0,
+                        body.value,
                     )
                 }
-                Value::Struct(name, expr, args, _) => {
+                Value::Struct(Struct {
+                    name, body, args, ..
+                }) => {
                     write!(
                         f,
                         "{}({}) {{ {} }}",
                         name.unwrap_or(""),
                         args.iter()
-                            .map(|(k, v)| format!("{k}={v}"))
+                            .map(|StructArg { param, value }| format!("{param}={value}"))
                             .collect::<Vec<_>>()
                             .join(", "),
-                        expr.0,
+                        body.value,
                     )
                 }
             }
@@ -422,10 +556,22 @@ mod fixity {
     }
 
     #[derive(Debug, Clone, PartialEq)]
+    pub struct StructPatt<'src> {
+        pub name: &'src str,
+        pub args: Spanned<Vec<Spanned<Patt<'src>>>>,
+    }
+
+    impl SpanlessPartialEq for StructPatt<'_> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.name == other.name && self.args.spanless_eq(&other.args)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
     pub enum Patt<'src> {
         Var(&'src str),
         Lit(Value<'src>),
-        Struct(&'src str, Spanned<Vec<Spanned<Self>>>),
+        Struct(StructPatt<'src>),
     }
 
     impl<'src> fmt::Display for Patt<'src> {
@@ -433,14 +579,14 @@ mod fixity {
             match self {
                 Patt::Var(ident) => write!(f, "{ident}"),
                 Patt::Lit(value) => write!(f, "{value}"),
-                Patt::Struct(name, args) => {
+                Patt::Struct(StructPatt { name, args }) => {
                     write!(
                         f,
                         "{}({})",
                         name,
-                        args.0
+                        args.value
                             .iter()
-                            .map(|p| p.0.to_string())
+                            .map(|p| p.value.to_string())
                             .collect::<Vec<_>>()
                             .join(", "),
                     )
@@ -454,11 +600,24 @@ mod fixity {
             match (self, other) {
                 (Patt::Var(l), Patt::Var(r)) => l == r,
                 (Patt::Lit(l), Patt::Lit(r)) => l.spanless_eq(r),
-                (Patt::Struct(l_name, l_args), Patt::Struct(r_name, r_args)) => {
-                    l_name == r_name && l_args.spanless_eq(r_args)
-                }
+                (Patt::Struct(l), Patt::Struct(r)) => l.spanless_eq(r),
                 _ => false,
             }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Op<'src> {
+        pub lhs: Box<Spanned<Expr<'src>>>,
+        pub op: Box<Spanned<Expr<'src>>>,
+        pub rhs: Box<Spanned<Expr<'src>>>,
+    }
+
+    impl SpanlessPartialEq for Op<'_> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.lhs.spanless_eq(&other.lhs)
+                && self.op.spanless_eq(&other.op)
+                && self.rhs.spanless_eq(&other.rhs)
         }
     }
 
@@ -468,20 +627,12 @@ mod fixity {
         Err,
         Lit(Value<'src>),
         Var(&'src str),
-        Call(Box<Spanned<Self>>, Spanned<Vec<Spanned<Self>>>),
-        Fn(Spanned<Vec<&'src str>>, Rc<Spanned<Self>>),
-        Case(
-            Box<Spanned<Self>>,
-            Spanned<Vec<(Spanned<Patt<'src>>, Box<Spanned<Self>>)>>,
-        ),
-        Op(Box<Spanned<Self>>, Box<Spanned<Self>>, Box<Spanned<Self>>),
-        Let(
-            Option<(OpAssoc, i64)>,
-            &'src str,
-            Box<Spanned<Self>>,
-            Box<Spanned<Self>>,
-        ),
-        LetRec(Vec<RecFn<'src, Rc<Spanned<Self>>>>, Box<Spanned<Self>>),
+        Call(Call<Self>),
+        Fn(FnExpr<'src, Rc<Spanned<Self>>>),
+        Case(Case<'src, Self>),
+        Op(Op<'src>),
+        Let(Let<'src, Self>),
+        LetRec(LetRec<'src, Self, Rc<Spanned<Self>>>),
         Builtin(fn(&Spanned<Expr<'src>>, &Env<'src>) -> Result<Value<'src>, Error>),
     }
 
@@ -491,73 +642,69 @@ mod fixity {
                 Expr::Err => write!(f, "<error>"),
                 Expr::Lit(value) => write!(f, "{value}"),
                 Expr::Var(ident) => write!(f, "{ident}"),
-                Expr::Call(func, args) => write!(
+                Expr::Call(Call { callee, args }) => write!(
                     f,
                     "{}({})",
-                    func.0,
-                    args.0
+                    callee.value,
+                    args.value
                         .iter()
-                        .map(|e| e.0.to_string())
+                        .map(|e| e.value.to_string())
                         .collect::<Vec<_>>()
                         .join(", "),
                 ),
-                Expr::Fn(params, body) => {
+                Expr::Fn(FnExpr { params, body }) => {
                     write!(
                         f,
                         "fn({}) {{{}}}",
                         params
-                            .0
+                            .value
                             .iter()
                             .map(|p| p.to_string())
                             .collect::<Vec<_>>()
                             .join(", "),
-                        body.0,
+                        body.value,
                     )
                 }
-                Expr::Case(expr, arms) => {
+                Expr::Case(Case { scrutinee, arms }) => {
                     write!(
                         f,
                         "case {} {{ {} }}",
-                        expr.0,
-                        arms.0
+                        scrutinee.value,
+                        arms.value
                             .iter()
-                            .map(|(patt, body)| format!("{} => {}", patt.0, body.0))
+                            .map(|CaseArm { patt, body }| format!(
+                                "{} => {}",
+                                patt.value, body.value
+                            ))
                             .collect::<Vec<_>>()
                             .join(", "),
                     )
                 }
-                Expr::Op(l, op, r) => write!(f, "({} {} {})", l.0, op.0, r.0),
-                Expr::Let(op_spec, ident, assign, body) => {
-                    write!(
-                        f,
-                        "let{} {} = {} {}",
-                        match op_spec {
-                            Some((OpAssoc::Left, prec)) => format!(" opl {prec}"),
-                            Some((OpAssoc::Right, prec)) => format!(" opr {prec}"),
-                            None => "".to_string(),
-                        },
-                        ident,
-                        assign.0,
-                        body.0
-                    )
+                Expr::Op(Op { lhs, op, rhs }) => {
+                    write!(f, "({} {} {})", lhs.value, op.value, rhs.value)
                 }
-                Expr::LetRec(bindings, body) => {
+                Expr::Let(Let {
+                    fixity,
+                    name,
+                    init,
+                    body,
+                }) => {
+                    fmt_let(f, *fixity, name, &init.value)?;
+                    write!(f, " {}", body.value)
+                }
+                Expr::LetRec(LetRec { bindings, body }) => {
                     write!(f, "let {{")?;
                     for binding in bindings {
-                        match binding.fixity {
-                            Some((OpAssoc::Left, prec)) => write!(f, " opl {prec}")?,
-                            Some((OpAssoc::Right, prec)) => write!(f, " opr {prec}")?,
-                            None => {}
-                        }
+                        fmt_fixity(f, binding.fixity)?;
                         write!(
                             f,
                             " {} = fn({}) {{ {} }}",
-                            binding.name.0,
-                            binding.params.0.join(", "),
-                            binding.body.0,
+                            binding.name.value,
+                            binding.params.value.join(", "),
+                            binding.body.value,
                         )?;
                     }
-                    write!(f, " }} {}", body.0)
+                    write!(f, " }} {}", body.value)
                 }
                 Expr::Builtin(_) => write!(f, "<builtin>"),
             }
@@ -570,37 +717,12 @@ mod fixity {
                 (Expr::Err, Expr::Err) => true,
                 (Expr::Lit(l), Expr::Lit(r)) => l.spanless_eq(r),
                 (Expr::Var(l), Expr::Var(r)) => l == r,
-                (Expr::Call(l_func, l_args), Expr::Call(r_func, r_args)) => {
-                    l_func.spanless_eq(r_func) && l_args.spanless_eq(r_args)
-                }
-                (Expr::Fn(l_params, l_body), Expr::Fn(r_params, r_body)) => {
-                    l_params.spanless_eq(r_params) && l_body.spanless_eq(r_body)
-                }
-                (Expr::Case(l_expr, l_arms), Expr::Case(r_expr, r_arms)) => {
-                    l_expr.spanless_eq(r_expr)
-                        && l_arms.0.iter().zip(r_arms.0.iter()).all(
-                            |((l_patt, l_body), (r_patt, r_body))| {
-                                l_patt.spanless_eq(r_patt) && l_body.spanless_eq(r_body)
-                            },
-                        )
-                }
-                (Expr::Op(l_left, l_op, l_right), Expr::Op(r_left, r_op, r_right)) => {
-                    l_left.spanless_eq(r_left)
-                        && l_op.spanless_eq(r_op)
-                        && l_right.spanless_eq(r_right)
-                }
-                (
-                    Expr::Let(l_op_spec, l_ident, l_assign, l_body),
-                    Expr::Let(r_op_spec, r_ident, r_assign, r_body),
-                ) => {
-                    l_op_spec == r_op_spec
-                        && l_ident == r_ident
-                        && l_assign.spanless_eq(r_assign)
-                        && l_body.spanless_eq(r_body)
-                }
-                (Expr::LetRec(l_bindings, l_body), Expr::LetRec(r_bindings, r_body)) => {
-                    l_bindings.spanless_eq(r_bindings) && l_body.spanless_eq(r_body)
-                }
+                (Expr::Call(l), Expr::Call(r)) => l.spanless_eq(r),
+                (Expr::Fn(l), Expr::Fn(r)) => l.spanless_eq(r),
+                (Expr::Case(l), Expr::Case(r)) => l.spanless_eq(r),
+                (Expr::Op(l), Expr::Op(r)) => l.spanless_eq(r),
+                (Expr::Let(l), Expr::Let(r)) => l.spanless_eq(r),
+                (Expr::LetRec(l), Expr::LetRec(r)) => l.spanless_eq(r),
                 _ => false,
             }
         }
@@ -617,6 +739,20 @@ mod interp {
     }
 
     pub type Env<'src> = rpds::HashTrieMap<&'src str, Rc<Value<'src>>>;
-    pub type Bindings<'src> = Vec<(&'src str, Value<'src>)>;
-    pub type StructArgs<'src> = Rc<[(&'src str, Rc<Value<'src>>)]>;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Binding<'src> {
+        pub name: &'src str,
+        pub value: Value<'src>,
+    }
+
+    pub type Bindings<'src> = Vec<Binding<'src>>;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct StructArg<'src> {
+        pub param: &'src str,
+        pub value: Rc<Value<'src>>,
+    }
+
+    pub type StructArgs<'src> = Rc<[StructArg<'src>]>;
 }

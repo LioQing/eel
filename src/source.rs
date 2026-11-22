@@ -78,8 +78,8 @@ impl<'src> Source<'src> {
                     .map(|error| Diagnostic::from_rich(error, self.start))
                     .collect::<Vec<_>>()
             })?;
-        for (_, span) in &mut tokens {
-            *span = offset_span(*span, self.start);
+        for token in &mut tokens {
+            token.span = offset_span(token.span, self.start);
         }
         Ok(tokens)
     }
@@ -164,7 +164,7 @@ mod tests {
         let toks = source.lex().unwrap();
         let (expr, _) = parse::expr_and_item_parsers();
         let syntax = expr
-            .parse(toks.as_slice().map(source.eof(), |(t, s)| (t, s)))
+            .parse(toks.as_slice().map(source.eof(), Spanned::as_parts))
             .unwrap();
         let closure = interp::eval(&fixity::resolve(syntax, &[]), builtin::env()).unwrap();
 
@@ -172,7 +172,7 @@ mod tests {
         let toks = source.lex().unwrap();
         let (expr, _) = parse::expr_and_item_parsers();
         let syntax = expr
-            .parse(toks.as_slice().map(source.eof(), |(t, s)| (t, s)))
+            .parse(toks.as_slice().map(source.eof(), Spanned::as_parts))
             .unwrap();
         let env = builtin::env().insert("f", std::rc::Rc::new(closure));
         let error = interp::eval(&fixity::resolve(syntax, &[]), env).unwrap_err();
@@ -208,7 +208,7 @@ mod tests {
         let toks = source.lex().unwrap();
         let (expr, _) = parse::expr_and_item_parsers();
         let errors = expr
-            .parse(toks.as_slice().map(source.eof(), |(t, s)| (t, s)))
+            .parse(toks.as_slice().map(source.eof(), Spanned::as_parts))
             .into_errors();
         sources.add("next".into(), "42".into());
 

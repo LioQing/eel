@@ -73,7 +73,7 @@ pub fn lexer<'src>()
         .then(any().and_is(just('\n').not()).repeated())
         .padded();
 
-    tok.map_with(|tok, e| (tok, e.span()))
+    tok.map_with(|tok, e| Spanned::new(tok, e.span()))
         .padded_by(comment.repeated())
         .padded()
         .recover_with(skip_then_retry_until(any().ignored(), end()))
@@ -83,8 +83,8 @@ pub fn lexer<'src>()
         // or recover into executable fragments of the original literal.
         .try_map(|toks, _| {
             toks.into_iter()
-                .map(|(tok, span)| {
-                    tok.map(|tok| (tok, span)).map_err(|err| {
+                .map(|Spanned { value, span }| {
+                    value.map(|tok| Spanned::new(tok, span)).map_err(|err| {
                         Rich::custom(span, format!("Invalid integer literal: {err}"))
                     })
                 })
@@ -129,7 +129,7 @@ mod tests {
             assert_eq!(
                 toks.unwrap()
                     .into_iter()
-                    .map(|(tok, _)| tok)
+                    .map(|tok| tok.value)
                     .collect::<Vec<_>>(),
                 expected,
             );

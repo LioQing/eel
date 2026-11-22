@@ -1,4 +1,5 @@
 pub use std::fmt;
+use std::rc::Rc;
 
 use chumsky::prelude::*;
 
@@ -18,6 +19,12 @@ pub trait SpanlessPartialEq {
 impl<T: SpanlessPartialEq> SpanlessPartialEq for Spanned<T> {
     fn spanless_eq(&self, other: &Self) -> bool {
         self.0.spanless_eq(&other.0)
+    }
+}
+
+impl<T: SpanlessPartialEq> SpanlessPartialEq for Rc<T> {
+    fn spanless_eq(&self, other: &Self) -> bool {
+        self.as_ref().spanless_eq(other.as_ref())
     }
 }
 
@@ -91,12 +98,28 @@ mod lex {
 mod parse {
     use super::*;
 
-    pub type LetHead<'src> = (Option<(OpAssoc, i64)>, &'src str);
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct RecFn<'src, Body> {
+        pub name: Spanned<&'src str>,
+        pub fixity: Option<(OpAssoc, i64)>,
+        pub params: Spanned<Vec<&'src str>>,
+        pub body: Body,
+    }
+
+    impl<Body: SpanlessPartialEq> SpanlessPartialEq for RecFn<'_, Body> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.name.0 == other.name.0
+                && self.fixity == other.fixity
+                && self.params.spanless_eq(&other.params)
+                && self.body.spanless_eq(&other.body)
+        }
+    }
 
     #[derive(Debug)]
     pub enum ReplItem<'src> {
         Expr(Spanned<SyntaxExpr<'src>>),
         Let(Option<(OpAssoc, i64)>, &'src str, Spanned<SyntaxExpr<'src>>),
+        LetRec(Vec<RecFn<'src, Spanned<SyntaxExpr<'src>>>>),
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +138,7 @@ mod parse {
             Box<Spanned<Self>>,
             Box<Spanned<Self>>,
         ),
+        LetRec(Vec<RecFn<'src, Spanned<Self>>>, Box<Spanned<Self>>),
     }
 
     impl<'src> fmt::Display for SyntaxExpr<'src> {
@@ -177,6 +201,24 @@ mod parse {
                         body.0
                     )
                 }
+                SyntaxExpr::LetRec(bindings, body) => {
+                    write!(f, "let {{")?;
+                    for binding in bindings {
+                        match binding.fixity {
+                            Some((OpAssoc::Left, prec)) => write!(f, " opl {prec}")?,
+                            Some((OpAssoc::Right, prec)) => write!(f, " opr {prec}")?,
+                            None => {}
+                        }
+                        write!(
+                            f,
+                            " {} = fn({}) {{ {} }}",
+                            binding.name.0,
+                            binding.params.0.join(", "),
+                            binding.body.0,
+                        )?;
+                    }
+                    write!(f, " }} {}", body.0)
+                }
             }
         }
     }
@@ -219,6 +261,10 @@ mod parse {
                         && l_assign.spanless_eq(r_assign)
                         && l_body.spanless_eq(r_body)
                 }
+                (
+                    SyntaxExpr::LetRec(l_bindings, l_body),
+                    SyntaxExpr::LetRec(r_bindings, r_body),
+                ) => l_bindings.spanless_eq(r_bindings) && l_body.spanless_eq(r_body),
                 _ => false,
             }
         }
@@ -247,20 +293,40 @@ mod fixity {
     use super::*;
 
     #[derive(Debug, Clone, PartialEq)]
+    pub struct Closure<'src> {
+        pub name: Option<&'src str>, // Display and struct name
+        pub group: Rc<ClosureGroup<'src>>,
+        pub member: usize,
+    }
+
+    impl<'src> Closure<'src> {
+        pub fn definition(&self) -> &ClosureDef<'src> {
+            &self.group.members[self.member]
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct ClosureGroup<'src> {
+        pub env: Env<'src>,
+        pub members: Box<[ClosureDef<'src>]>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct ClosureDef<'src> {
+        pub rec_name: Option<&'src str>,
+        pub params: Vec<&'src str>,
+        pub body: Rc<Spanned<Expr<'src>>>,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
     pub enum Value<'src> {
         Unit,
         Float(f64),
         Int(i64),
-        Closure(
-            Option<&'src str>, // Display and struct name
-            Option<&'src str>, // Recursive name from the definition
-            Vec<&'src str>,
-            Box<Spanned<Expr<'src>>>,
-            Env<'src>,
-        ),
+        Closure(Closure<'src>),
         Struct(
             Option<&'src str>,
-            Box<Spanned<Expr<'src>>>,
+            Rc<Spanned<Expr<'src>>>,
             StructArgs<'src>,
             Env<'src>,
         ),
@@ -272,16 +338,21 @@ mod fixity {
                 Value::Unit => write!(f, "unit"),
                 Value::Float(value) => write!(f, "{value}"),
                 Value::Int(value) => write!(f, "{value}"),
-                Value::Closure(name, rec_name, params, body, _) => {
+                Value::Closure(closure) => {
+                    let ClosureDef {
+                        rec_name,
+                        params,
+                        body,
+                    } = closure.definition();
                     write!(
                         f,
                         "fn{}{}({}) {{ {} }}",
-                        match name {
+                        match rec_name {
                             Some(n) => format!(" {n}"),
                             None => String::new(),
                         },
-                        match rec_name {
-                            Some(n) if n != &name.unwrap_or("") => format!("`{n}`"),
+                        match closure.name {
+                            Some(n) if Some(n) != *rec_name => format!("`{n}`"),
                             _ => String::new(),
                         },
                         params
@@ -362,7 +433,7 @@ mod fixity {
         Lit(Value<'src>),
         Var(&'src str),
         Call(Box<Spanned<Self>>, Spanned<Vec<Spanned<Self>>>),
-        Fn(Spanned<Vec<&'src str>>, Box<Spanned<Self>>),
+        Fn(Spanned<Vec<&'src str>>, Rc<Spanned<Self>>),
         Case(
             Box<Spanned<Self>>,
             Spanned<Vec<(Spanned<Patt<'src>>, Box<Spanned<Self>>)>>,
@@ -374,6 +445,7 @@ mod fixity {
             Box<Spanned<Self>>,
             Box<Spanned<Self>>,
         ),
+        LetRec(Vec<RecFn<'src, Rc<Spanned<Self>>>>, Box<Spanned<Self>>),
         Builtin(fn(&Spanned<Expr<'src>>, &Env<'src>) -> Result<Value<'src>, Error>),
     }
 
@@ -433,6 +505,24 @@ mod fixity {
                         body.0
                     )
                 }
+                Expr::LetRec(bindings, body) => {
+                    write!(f, "let {{")?;
+                    for binding in bindings {
+                        match binding.fixity {
+                            Some((OpAssoc::Left, prec)) => write!(f, " opl {prec}")?,
+                            Some((OpAssoc::Right, prec)) => write!(f, " opr {prec}")?,
+                            None => {}
+                        }
+                        write!(
+                            f,
+                            " {} = fn({}) {{ {} }}",
+                            binding.name.0,
+                            binding.params.0.join(", "),
+                            binding.body.0,
+                        )?;
+                    }
+                    write!(f, " }} {}", body.0)
+                }
                 Expr::Builtin(_) => write!(f, "<builtin>"),
             }
         }
@@ -472,6 +562,9 @@ mod fixity {
                         && l_assign.spanless_eq(r_assign)
                         && l_body.spanless_eq(r_body)
                 }
+                (Expr::LetRec(l_bindings, l_body), Expr::LetRec(r_bindings, r_body)) => {
+                    l_bindings.spanless_eq(r_bindings) && l_body.spanless_eq(r_body)
+                }
                 _ => false,
             }
         }
@@ -479,8 +572,6 @@ mod fixity {
 }
 
 mod interp {
-    use std::rc::Rc;
-
     use super::*;
 
     #[derive(Debug, Clone, PartialEq)]

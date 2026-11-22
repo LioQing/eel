@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use crate::declare::*;
 
 fn op_spec(op: &Spanned<Expr<'_>>, specs: &[OpSpec<'_>]) -> (OpAssoc, i64) {
@@ -41,8 +43,18 @@ fn shadow_patt<'src>(patt: &Patt<'src>, specs: &mut Vec<OpSpec<'src>>) {
     }
 }
 
+fn resolve_fn_body<'src>(
+    params: &[&'src str],
+    body: Spanned<SyntaxExpr<'src>>,
+    specs: &[OpSpec<'src>],
+) -> Rc<Spanned<Expr<'src>>> {
+    let mut scoped_specs = specs.to_vec();
+    scoped_specs.extend(params.iter().map(|name| (*name, OpAssoc::Left, 0)));
+    Rc::new(resolve(body, &scoped_specs))
+}
+
 /// Resolves the expression and returns the fixities in scope after the binding.
-pub fn resolve_binding<'src>(
+pub fn resolve_let<'src>(
     name: &'src str,
     spec: Option<(OpAssoc, i64)>,
     expr: Spanned<SyntaxExpr<'src>>,
@@ -62,6 +74,30 @@ pub fn resolve_binding<'src>(
     (resolve(expr, expr_specs), scoped_specs)
 }
 
+/// Resolves all members and returns the fixities in scope after the group.
+pub fn resolve_let_rec<'src>(
+    members: Vec<RecFn<'src, Spanned<SyntaxExpr<'src>>>>,
+    specs: &[OpSpec<'src>],
+) -> (Vec<RecFn<'src, Rc<Spanned<Expr<'src>>>>>, Vec<OpSpec<'src>>) {
+    let mut scoped_specs = specs.to_vec();
+    scoped_specs.extend(members.iter().map(|member| {
+        let (assoc, prec) = member.fixity.unwrap_or_default();
+        (member.name.0, assoc, prec)
+    }));
+
+    let members = members
+        .into_iter()
+        .map(|member| RecFn {
+            name: member.name,
+            fixity: member.fixity,
+            body: resolve_fn_body(&member.params.0, member.body, &scoped_specs),
+            params: member.params,
+        })
+        .collect();
+
+    (members, scoped_specs)
+}
+
 pub fn resolve<'src>(
     (expr, span): Spanned<SyntaxExpr<'src>>,
     specs: &[OpSpec<'src>],
@@ -76,9 +112,8 @@ pub fn resolve<'src>(
             ),
         ),
         SyntaxExpr::Fn(params, body) => {
-            let mut scoped_specs = specs.to_vec();
-            scoped_specs.extend(params.0.iter().map(|name| (*name, OpAssoc::Left, 0)));
-            Expr::Fn(params, Box::new(resolve(*body, &scoped_specs)))
+            let body = resolve_fn_body(&params.0, *body, specs);
+            Expr::Fn(params, body)
         }
         SyntaxExpr::Case(expr, (arms, arms_span)) => Expr::Case(
             Box::new(resolve(*expr, specs)),
@@ -114,13 +149,17 @@ pub fn resolve<'src>(
             return (operands.pop().unwrap().0, span);
         }
         SyntaxExpr::Let(spec, name, assign, body) => {
-            let (assign, scoped_specs) = resolve_binding(name, spec, *assign, specs);
+            let (assign, scoped_specs) = resolve_let(name, spec, *assign, specs);
             Expr::Let(
                 spec,
                 name,
                 Box::new(assign),
                 Box::new(resolve(*body, &scoped_specs)),
             )
+        }
+        SyntaxExpr::LetRec(members, body) => {
+            let (members, scoped_specs) = resolve_let_rec(members, specs);
+            Expr::LetRec(members, Box::new(resolve(*body, &scoped_specs)))
         }
     };
     (expr, span)
@@ -166,7 +205,7 @@ mod tests {
     }
 
     fn function<'src>(params: Vec<&'src str>, body: Spanned<Expr<'src>>) -> Spanned<Expr<'src>> {
-        spanned(Expr::Fn(spanned(params), Box::new(body)))
+        spanned(Expr::Fn(spanned(params), Rc::new(body)))
     }
 
     fn call<'src>(
@@ -983,6 +1022,69 @@ mod tests {
                 ),
                 binding(spec, "sub", function(vec!["a", "b"], expected), var("sub")),
             );
+        }
+    }
+
+    #[test]
+    fn test_recursive_group_resolves_forward_fixities_in_members_and_continuation() {
+        let chain = syntax_int_ops(10, &[("sub", 3), ("sub", 2), ("join", 5), ("join", 1)]);
+        let members = vec![
+            RecFn {
+                name: spanned("probe"),
+                fixity: None,
+                params: spanned(vec![]),
+                body: chain.clone(),
+            },
+            RecFn {
+                name: spanned("sub"),
+                fixity: Some((OpAssoc::Right, 4)),
+                params: spanned(vec!["a", "b"]),
+                body: syntax_var("a"),
+            },
+            RecFn {
+                name: spanned("join"),
+                fixity: Some((OpAssoc::Left, 2)),
+                params: spanned(vec!["a", "b"]),
+                body: syntax_var("a"),
+            },
+        ];
+        let syntax = spanned(SyntaxExpr::LetRec(members, Box::new(chain)));
+        let expr = resolve(
+            syntax,
+            &[("sub", OpAssoc::Left, 1), ("join", OpAssoc::Right, 7)],
+        );
+        let Expr::LetRec(members, body) = expr.0 else {
+            panic!("Expected recursive let, got {expr:?}");
+        };
+        let expected = op(op(right_sub_chain(), "join", int(5)), "join", int(1));
+        assert_eq!(*members[0].body, expected);
+        assert_eq!(*body, expected);
+    }
+
+    #[test]
+    fn test_recursive_group_fixities_follow_binding_and_parameter_shadowing() {
+        for (fixity, peer_body) in [
+            (None, left_sub_chain()),
+            (Some((OpAssoc::Right, 4)), right_sub_chain()),
+        ] {
+            let functions = [
+                ("shadow", vec!["sub"]),
+                ("peer", vec![]),
+                ("sub", vec!["a", "b"]),
+            ]
+            .into_iter()
+            .map(|(name, params)| RecFn {
+                name: spanned(name),
+                fixity: if name == "sub" { fixity } else { None },
+                params: spanned(params),
+                body: sub_chain(),
+            })
+            .collect();
+            let (members, specs) = resolve_let_rec(functions, &[("sub", OpAssoc::Right, 7)]);
+            assert_eq!(*members[0].body, left_sub_chain());
+            assert_eq!(*members[1].body, peer_body);
+            assert_eq!(*members[2].body, peer_body);
+            assert_eq!(resolve(sub_chain(), &specs), peer_body);
         }
     }
 

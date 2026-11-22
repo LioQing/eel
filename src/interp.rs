@@ -2,25 +2,24 @@ use std::rc::Rc;
 
 use crate::declare::*;
 
-fn closure_env<'src>(closure: &Value<'src>) -> Env<'src> {
-    let Value::Closure(_, rec_name, params, body, captured_env) = closure else {
-        unreachable!();
-    };
-
-    let mut env = captured_env.clone();
-    if let Some(rec_name) = *rec_name {
-        // Recreate the recursive binding when applying the closure, so its
-        // retained environment never needs to contain a cycle back to itself.
-        // Recursive calls use the definition's name, even through an alias.
-        let recursive = Value::Closure(
-            Some(rec_name),
-            Some(rec_name),
-            params.clone(),
-            body.clone(),
-            captured_env.clone(),
-        );
-        env.insert_mut(rec_name, Rc::new(recursive));
+fn insert_group<'src>(group: &Rc<ClosureGroup<'src>>, env: &mut Env<'src>) {
+    for (member, def) in group.members.iter().enumerate() {
+        if let Some(name) = def.rec_name {
+            let closure = Value::Closure(Closure {
+                name: Some(name),
+                group: Rc::clone(group),
+                member,
+            });
+            env.insert_mut(name, Rc::new(closure));
+        }
     }
+}
+
+fn closure_env<'src>(closure: &Closure<'src>) -> Env<'src> {
+    // The group owns definitions and the pre-binding snapshot, never its own
+    // closures. Recreate bindings with their original names, even through aliases.
+    let mut env = closure.group.env.clone();
+    insert_group(&closure.group, &mut env);
     env
 }
 
@@ -39,17 +38,45 @@ pub fn bind<'src>(
     expr: &Spanned<Expr<'src>>,
     env: &mut Env<'src>,
 ) -> Result<(), Error> {
-    let mut v = eval(expr, env.clone())?;
-    if let Value::Closure(name, rec_name, ..) = &mut v {
-        // Only a function definition introduces a recursive binding.
-        // Other lets can name a closure without changing its scope.
-        if matches!(&expr.0, Expr::Fn(..)) {
-            *rec_name = Some(x);
+    let v = match &expr.0 {
+        Expr::Fn(params, body) => Value::Closure(Closure {
+            name: Some(x),
+            group: Rc::new(ClosureGroup {
+                env: env.clone(),
+                members: Box::new([ClosureDef {
+                    rec_name: Some(x),
+                    params: params.0.clone(),
+                    body: Rc::clone(body),
+                }]),
+            }),
+            member: 0,
+        }),
+        _ => {
+            let mut v = eval(expr, env.clone())?;
+            // An alias changes the display and struct name, not the scope.
+            if let Value::Closure(closure) = &mut v {
+                closure.name = Some(x);
+            }
+            v
         }
-        *name = Some(x);
-    }
+    };
     env.insert_mut(x, Rc::new(v));
     Ok(())
+}
+
+pub fn bind_rec_group<'src>(members: &[RecFn<'src, Rc<Spanned<Expr<'src>>>>], env: &mut Env<'src>) {
+    let group = Rc::new(ClosureGroup {
+        env: env.clone(),
+        members: members
+            .iter()
+            .map(|member| ClosureDef {
+                rec_name: Some(member.name.0),
+                params: member.params.0.clone(),
+                body: Rc::clone(&member.body),
+            })
+            .collect(),
+    });
+    insert_group(&group, env);
 }
 
 pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'src>, Error> {
@@ -64,11 +91,9 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 span: expr.1.clone(),
             })?,
         Expr::Call(f, args) => match eval(f, env.clone())? {
-            closure @ Value::Closure(..) => {
-                let mut applied_env = closure_env(&closure);
-                let Value::Closure(name, _, params, body, _) = closure else {
-                    unreachable!();
-                };
+            Value::Closure(closure) => {
+                let name = closure.name;
+                let ClosureDef { params, body, .. } = closure.definition();
                 if params.len() != args.0.len() {
                     return Err(Error {
                         msg: format!(
@@ -82,7 +107,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let body = crate::builtin::body_at_call_site(body, f.1);
+                let body = crate::builtin::body_at_call_site(Rc::clone(body), f.1);
 
                 let struct_args: StructArgs<'src> = params
                     .iter()
@@ -90,6 +115,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     .map(|(param, arg)| Ok((*param, Rc::new(eval(arg, env.clone())?))))
                     .collect::<Result<_, _>>()?;
 
+                let mut applied_env = closure_env(&closure);
                 for (param, value) in struct_args.iter() {
                     applied_env.insert_mut(*param, Rc::clone(value));
                 }
@@ -117,7 +143,18 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 });
             }
         },
-        Expr::Fn(params, body) => Value::Closure(None, None, params.0.clone(), body.clone(), env),
+        Expr::Fn(params, body) => Value::Closure(Closure {
+            name: None,
+            group: Rc::new(ClosureGroup {
+                env,
+                members: Box::new([ClosureDef {
+                    rec_name: None,
+                    params: params.0.clone(),
+                    body: Rc::clone(body),
+                }]),
+            }),
+            member: 0,
+        }),
         Expr::Case(e, arms) => {
             let v = eval(e, env.clone())?;
 
@@ -136,11 +173,9 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
             eval(body, new_env)?
         }
         Expr::Op(e1, op, e2) => match eval(op, env.clone())? {
-            closure @ Value::Closure(..) => {
-                let mut new_env = closure_env(&closure);
-                let Value::Closure(name, _, params, body, _) = closure else {
-                    unreachable!();
-                };
+            Value::Closure(closure) => {
+                let name = closure.name;
+                let ClosureDef { params, body, .. } = closure.definition();
                 if params.len() != 2 {
                     return Err(Error {
                         msg: format!(
@@ -153,11 +188,12 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let body = crate::builtin::body_at_call_site(body, op.1);
+                let body = crate::builtin::body_at_call_site(Rc::clone(body), op.1);
 
                 let arg1 = eval(e1, env.clone())?;
                 let arg2 = eval(e2, env.clone())?;
 
+                let mut new_env = closure_env(&closure);
                 extend_env(&mut new_env, [(params[0], arg1), (params[1], arg2)]);
 
                 eval(&body, new_env)?
@@ -172,6 +208,11 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
         Expr::Let(_, x, e, body) => {
             let mut new_env = env;
             bind(x, e, &mut new_env)?;
+            eval(body, new_env)?
+        }
+        Expr::LetRec(members, body) => {
+            let mut new_env = env;
+            bind_rec_group(members, &mut new_env);
             eval(body, new_env)?
         }
         Expr::Builtin(f) => f(&expr, &env)?,
@@ -238,7 +279,7 @@ mod tests {
     }
 
     fn function<'src>(params: Vec<&'src str>, body: Spanned<Expr<'src>>) -> Spanned<Expr<'src>> {
-        spanned(Expr::Fn(spanned(params), Box::new(body)))
+        spanned(Expr::Fn(spanned(params), Rc::new(body)))
     }
 
     fn call<'src>(
@@ -290,7 +331,7 @@ mod tests {
         let env = args.iter().cloned().collect();
         Value::Struct(
             Some(name),
-            Box::new(spanned(Expr::Lit(Value::Unit))),
+            Rc::new(spanned(Expr::Lit(Value::Unit))),
             args,
             env,
         )
@@ -338,13 +379,18 @@ mod tests {
             ("y", Value::Float(3.14)),
             (
                 "id",
-                Value::Closure(
-                    Some("id"),
-                    None,
-                    vec!["y"],
-                    Box::new(spanned(Expr::Var("y"))),
-                    Default::default(),
-                ),
+                Value::Closure(Closure {
+                    name: Some("id"),
+                    group: Rc::new(ClosureGroup {
+                        env: Default::default(),
+                        members: Box::new([ClosureDef {
+                            rec_name: None,
+                            params: vec!["y"],
+                            body: Rc::new(spanned(Expr::Var("y"))),
+                        }]),
+                    }),
+                    member: 0,
+                }),
             ),
         ]);
 
@@ -362,13 +408,19 @@ mod tests {
 
     #[test]
     fn test_call_closure() {
-        let id = Value::Closure(
-            Some("id"),
-            Some("id"),
-            vec!["y"],
-            Box::new(spanned(Expr::Var("y"))),
-            Default::default(),
-        );
+        let body = Rc::new((Expr::Var("y"), (8..9).into()));
+        let id = Value::Closure(Closure {
+            name: Some("id"),
+            group: Rc::new(ClosureGroup {
+                env: Default::default(),
+                members: Box::new([ClosureDef {
+                    rec_name: Some("id"),
+                    params: vec!["y"],
+                    body: Rc::clone(&body),
+                }]),
+            }),
+            member: 0,
+        });
         let env = env_from([
             ("x", Value::Int(42)),
             ("y", Value::Float(3.14)),
@@ -381,16 +433,20 @@ mod tests {
             spanned(vec![spanned(Expr::Var("x"))]),
         ));
 
-        assert_eval(
-            expr,
-            env,
+        let value = eval(&expr, env).unwrap();
+        assert_eq!(
+            value,
             Value::Struct(
                 Some("id"),
-                Box::new(spanned(Expr::Var("y"))),
+                Rc::clone(&body),
                 Rc::from([("y", Rc::new(Value::Int(42)))]),
                 env_from([("id", id), ("y", Value::Int(42))]),
             ),
         );
+        let Value::Struct(_, applied_body, ..) = value.clone() else {
+            panic!("expected a struct");
+        };
+        assert!(Rc::ptr_eq(&applied_body, &body));
     }
 
     #[test]
@@ -404,7 +460,7 @@ mod tests {
                 "x_struct",
                 Value::Struct(
                     Some("x_struct"),
-                    Box::new(spanned(Expr::Var("x"))),
+                    Rc::new(spanned(Expr::Var("x"))),
                     Rc::from([("x", x_arg)]),
                     applied_env,
                 ),
@@ -427,19 +483,24 @@ mod tests {
         // fn(y) { y }
         let expr = spanned(Expr::Fn(
             spanned(vec!["y"]),
-            Box::new(spanned(Expr::Var("y"))),
+            Rc::new(spanned(Expr::Var("y"))),
         ));
 
         assert_eval(
             expr,
             env.clone(),
-            Value::Closure(
-                None,
-                None,
-                vec!["y"],
-                Box::new(spanned(Expr::Var("y"))),
-                env,
-            ),
+            Value::Closure(Closure {
+                name: None,
+                group: Rc::new(ClosureGroup {
+                    env,
+                    members: Box::new([ClosureDef {
+                        rec_name: None,
+                        params: vec!["y"],
+                        body: Rc::new(spanned(Expr::Var("y"))),
+                    }]),
+                }),
+                member: 0,
+            }),
         );
     }
 
@@ -447,20 +508,26 @@ mod tests {
     fn test_closures_share_snapshot_until_shadowing() {
         let env = env_from([("x", Value::Int(1)), ("y", Value::Int(2))]);
         let function = function(vec![], var("x"));
-        let Value::Closure(.., first) = eval(&function, env.clone()).unwrap() else {
+        let Value::Closure(first) = eval(&function, env.clone()).unwrap() else {
             panic!("expected a closure");
         };
-        let Value::Closure(.., second) = eval(&function, env.clone()).unwrap() else {
+        let Value::Closure(second) = eval(&function, env.clone()).unwrap() else {
             panic!("expected a closure");
         };
+        assert!(Rc::ptr_eq(
+            &first.definition().body,
+            &second.definition().body
+        ));
+        let first = &first.group.env;
         assert!(first.ptr_eq(&env));
-        assert!(second.ptr_eq(&first));
+        assert!(second.group.env.ptr_eq(first));
 
         let shadow = binding("x", int(42), function);
-        let Value::Closure(.., shadowed) = eval(&shadow, env.clone()).unwrap() else {
+        let Value::Closure(shadowed) = eval(&shadow, env.clone()).unwrap() else {
             panic!("expected a closure");
         };
-        assert!(!shadowed.ptr_eq(&first));
+        let shadowed = &shadowed.group.env;
+        assert!(!shadowed.ptr_eq(first));
         assert_eq!(first.get("x").unwrap().as_ref(), &Value::Int(1));
         assert_eq!(shadowed.get("x").unwrap().as_ref(), &Value::Int(42));
         assert!(Rc::ptr_eq(
@@ -482,10 +549,10 @@ mod tests {
         let env = env_from([("value", value.clone())]);
         let force = call(var("value"), vec![]);
         for _ in 0..2 {
-            let Value::Closure(.., captured_env) = eval(&force, env.clone()).unwrap() else {
+            let Value::Closure(closure) = eval(&force, env.clone()).unwrap() else {
                 panic!("expected a closure");
             };
-            assert!(captured_env.ptr_eq(applied_env));
+            assert!(closure.group.env.ptr_eq(applied_env));
         }
     }
 
@@ -551,7 +618,7 @@ mod tests {
             "id",
             Box::new(spanned(Expr::Fn(
                 spanned(vec!["y"]),
-                Box::new(spanned(Expr::Var("y"))),
+                Rc::new(spanned(Expr::Var("y"))),
             ))),
             Box::new(spanned(Expr::Var("id"))),
         ));
@@ -559,13 +626,18 @@ mod tests {
         assert_eval(
             expr,
             env.clone(),
-            Value::Closure(
-                Some("id"),
-                Some("id"),
-                vec!["y"],
-                Box::new(spanned(Expr::Var("y"))),
-                env,
-            ),
+            Value::Closure(Closure {
+                name: Some("id"),
+                group: Rc::new(ClosureGroup {
+                    env,
+                    members: Box::new([ClosureDef {
+                        rec_name: Some("id"),
+                        params: vec!["y"],
+                        body: Rc::new(spanned(Expr::Var("y"))),
+                    }]),
+                }),
+                member: 0,
+            }),
         );
     }
 
@@ -692,13 +764,18 @@ mod tests {
 
     #[test]
     fn test_caller_bindings_do_not_replace_lexical_bindings() {
-        let closure = Value::Closure(
-            Some("f"),
-            None,
-            vec![],
-            Box::new(var("x")),
-            env_from([("x", Value::Int(42))]),
-        );
+        let closure = Value::Closure(Closure {
+            name: Some("f"),
+            group: Rc::new(ClosureGroup {
+                env: env_from([("x", Value::Int(42))]),
+                members: Box::new([ClosureDef {
+                    rec_name: None,
+                    params: vec![],
+                    body: Rc::new(var("x")),
+                }]),
+            }),
+            member: 0,
+        });
         let expr = call(call(var("f"), vec![]), vec![]);
         assert_eval(
             expr,
@@ -709,13 +786,18 @@ mod tests {
 
     #[test]
     fn test_parameters_shadow_captured_bindings() {
-        let closure = Value::Closure(
-            Some("make"),
-            None,
-            vec!["x"],
-            Box::new(function(vec![], var("x"))),
-            env_from([("x", Value::Int(99))]),
-        );
+        let closure = Value::Closure(Closure {
+            name: Some("make"),
+            group: Rc::new(ClosureGroup {
+                env: env_from([("x", Value::Int(99))]),
+                members: Box::new([ClosureDef {
+                    rec_name: None,
+                    params: vec!["x"],
+                    body: Rc::new(function(vec![], var("x"))),
+                }]),
+            }),
+            member: 0,
+        });
         let expr = binding(
             "f",
             call(call(var("make"), vec![int(42)]), vec![]),
@@ -839,6 +921,46 @@ mod tests {
     }
 
     #[test]
+    fn test_recursive_group_outlives_scope_but_drops_with_last_reference() {
+        let members = [
+            RecFn {
+                name: spanned("first"),
+                fixity: None,
+                params: spanned(vec![]),
+                body: Rc::new(call(call(var("second"), vec![]), vec![])),
+            },
+            RecFn {
+                name: spanned("second"),
+                fixity: None,
+                params: spanned(vec![]),
+                body: Rc::new(var("base")),
+            },
+        ];
+        let mut env = env_from([("base", Value::Int(42))]);
+        bind_rec_group(&members, &mut env);
+        let Value::Closure(first) = env.get("first").unwrap().as_ref() else {
+            panic!("expected a group member");
+        };
+        let Value::Closure(second) = env.get("second").unwrap().as_ref() else {
+            panic!("expected a group member");
+        };
+        assert!(Rc::ptr_eq(&first.group, &second.group));
+        assert!(Rc::ptr_eq(&first.definition().body, &members[0].body));
+        assert!(first.group.env.get("first").is_none());
+        assert!(first.group.env.get("second").is_none());
+        let group = Rc::downgrade(&first.group);
+
+        let deferred = eval(&call(var("first"), vec![]), env).unwrap();
+        assert!(group.upgrade().is_some());
+        assert_eval(
+            call(var("deferred"), vec![]),
+            env_from([("deferred", deferred)]),
+            Value::Int(42),
+        );
+        assert!(group.upgrade().is_none());
+    }
+
+    #[test]
     fn test_parameters_shadow_recursive_binding() {
         let expr = binding(
             "f",
@@ -864,13 +986,18 @@ mod tests {
 
     #[test]
     fn test_caller_cannot_supply_missing_lexical_binding() {
-        let closure = Value::Closure(
-            Some("f"),
-            None,
-            vec![],
-            Box::new((Expr::Var("x"), (12..13).into())),
-            Default::default(),
-        );
+        let closure = Value::Closure(Closure {
+            name: Some("f"),
+            group: Rc::new(ClosureGroup {
+                env: Default::default(),
+                members: Box::new([ClosureDef {
+                    rec_name: None,
+                    params: vec![],
+                    body: Rc::new((Expr::Var("x"), (12..13).into())),
+                }]),
+            }),
+            member: 0,
+        });
         let expr = call(call(var("f"), vec![]), vec![]);
         assert_eq!(
             eval(&expr, env_from([("f", closure), ("x", Value::Int(42))])),

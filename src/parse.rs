@@ -1,57 +1,49 @@
+use std::collections::HashSet;
+
 use chumsky::{input::ValueInput, prelude::*};
 
 use crate::declare::*;
 
-fn let_head<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>, Span = Span>>()
--> impl Parser<'toks, I, LetHead<'src>, extra::Err<Rich<'toks, Token<'src>, Span>>> + Clone {
-    just(Token::Let)
-        .ignore_then(
-            just(Token::Opl)
-                .to(OpAssoc::Left)
-                .or(just(Token::Opr).to(OpAssoc::Right))
-                .then(select! { Token::Int(v) => v })
-                .or_not(),
-        )
-        .then(select! { Token::Ident(x) => x }.labelled("identifier"))
-        .then_ignore(just(Token::Assign))
-}
-
-pub fn repl_item_parser<
+/// Builds the expression and REPL item parsers from the same grammar.
+pub fn expr_and_item_parsers<
     'toks,
     'src: 'toks,
     I: ValueInput<'toks, Token = Token<'src>, Span = Span>,
->() -> impl Parser<'toks, I, ReplItem<'src>, extra::Err<Rich<'toks, Token<'src>, Span>>> {
-    let expr = expr_parser();
+>() -> (
+    impl Parser<'toks, I, Spanned<SyntaxExpr<'src>>, extra::Err<Rich<'toks, Token<'src>, Span>>> + Clone,
+    impl Parser<'toks, I, ReplItem<'src>, extra::Err<Rich<'toks, Token<'src>, Span>>>,
+) {
+    let ident = select! { Token::Ident(x) => x }.labelled("identifier");
 
-    let_head()
-        .then(expr.clone())
-        .then_ignore(end())
-        .map(|((op_spec, name), expr)| ReplItem::Let(op_spec, name, expr))
-        .labelled("let declaration")
-        .or(expr.map(ReplItem::Expr))
-}
+    let value = select! {
+        Token::Float(v) => Value::Float(v),
+        Token::Int(v) => Value::Int(v),
+        Token::Unit => Value::Unit,
+    }
+    .labelled("value");
 
-pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>, Span = Span>>()
--> impl Parser<'toks, I, Spanned<SyntaxExpr<'src>>, extra::Err<Rich<'toks, Token<'src>, Span>>> + Clone
-{
-    recursive(|expr| {
-        let value = select! {
-            Token::Float(v) => Value::Float(v),
-            Token::Int(v) => Value::Int(v),
-            Token::Unit => Value::Unit,
-        }
-        .labelled("value");
+    let lit = value
+        .map(|v| SyntaxExpr::Atom(Expr::Lit(v)))
+        .labelled("literal");
 
-        let lit = value
-            .map(|v| SyntaxExpr::Atom(Expr::Lit(v)))
-            .labelled("literal");
+    let var = ident
+        .map(|x| SyntaxExpr::Atom(Expr::Var(x)))
+        .labelled("variable");
 
-        let ident = select! { Token::Ident(x) => x }.labelled("identifier");
+    let binding_head = just(Token::Opl)
+        .to(OpAssoc::Left)
+        .or(just(Token::Opr).to(OpAssoc::Right))
+        .then(select! { Token::Int(v) => v })
+        .or_not()
+        .then(ident.map_with(|name, e| (name, e.span())))
+        .then_ignore(just(Token::Assign));
 
-        let var = ident
-            .map(|x| SyntaxExpr::Atom(Expr::Var(x)))
-            .labelled("variable");
+    let let_head = just(Token::Let)
+        .ignore_then(binding_head.clone())
+        .map(|(fixity, (name, _))| (fixity, name));
 
+    let mut let_rec_head = Recursive::declare();
+    let expr = recursive(|expr| {
         let mut inline = Recursive::declare();
         let mut op = Recursive::declare();
 
@@ -98,7 +90,7 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
             )
             .labelled("call expression");
 
-        let r#fn = just(Token::Fn)
+        let fn_parts = just(Token::Fn)
             .ignore_then(
                 ident
                     .separated_by(just(Token::Comma))
@@ -108,8 +100,11 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
                     .map_with(|params, e| (params, e.span())),
             )
             .then(inline.clone())
-            .map_with(|(params, body), e| (SyntaxExpr::Fn(params, Box::new(body)), e.span()))
             .labelled("function expression");
+
+        let r#fn = fn_parts
+            .clone()
+            .map_with(|(params, body), e| (SyntaxExpr::Fn(params, Box::new(body)), e.span()));
 
         let patt = recursive(|case_patt| {
             let r#struct = ident
@@ -160,7 +155,8 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
                 .map_with(|(first, rest), e| (SyntaxExpr::Ops(Box::new(first), rest), e.span())),
         );
 
-        let r#let = let_head()
+        let r#let = let_head
+            .clone()
             .then(inline.clone())
             .then(expr.clone())
             .map(|(((op_spec, x), assign), body)| {
@@ -169,8 +165,63 @@ pub fn expr_parser<'toks, 'src: 'toks, I: ValueInput<'toks, Token = Token<'src>,
             .map_with(|expr, e| (expr, e.span()))
             .labelled("let expression");
 
-        choice((op, inline, r#let)).labelled("expression")
-    })
+        let rec_fn = binding_head
+            .then(fn_parts)
+            .map(|((fixity, name), (params, body))| RecFn {
+                name,
+                fixity,
+                params,
+                body,
+            });
+
+        let_rec_head.define(
+            just(Token::Let).ignore_then(
+                rec_fn
+                    .repeated()
+                    .at_least(1)
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
+                    .validate(|bindings, _, emitter| {
+                        let mut names = HashSet::new();
+                        for binding in &bindings {
+                            let (name, span) = binding.name;
+                            if !names.insert(name) {
+                                emitter.emit(Rich::custom(
+                                    span,
+                                    format!("Duplicate name `{name}` in recursive let group"),
+                                ));
+                            }
+                        }
+                        bindings
+                    }),
+            ),
+        );
+
+        let let_rec = let_rec_head
+            .clone()
+            .then(expr)
+            .map_with(|(bindings, body), e| {
+                (SyntaxExpr::LetRec(bindings, Box::new(body)), e.span())
+            })
+            .labelled("recursive let expression");
+
+        choice((op, inline, r#let, let_rec)).labelled("expression")
+    });
+
+    let let_item = let_head
+        .then(expr.clone())
+        .then_ignore(end())
+        .map(|((op_spec, name), expr)| ReplItem::Let(op_spec, name, expr))
+        .labelled("let item");
+
+    let let_rec_item = let_rec_head
+        .then_ignore(end())
+        .map(ReplItem::LetRec)
+        .labelled("recursive let item");
+
+    let item = choice((let_item, let_rec_item, expr.clone().map(ReplItem::Expr)));
+
+    (expr, item)
 }
 
 #[cfg(test)]
@@ -207,7 +258,8 @@ mod tests {
 
             let toks = lex::lexer().parse(src).unwrap();
 
-            let (ast, errs) = expr_parser()
+            let (expr, _) = expr_and_item_parsers();
+            let (ast, errs) = expr
                 .parse(
                     toks.as_slice()
                         .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
@@ -709,15 +761,101 @@ mod tests {
         );
     }
 
-    fn parse_repl_item(src: &str) -> Result<ReplItem<'_>, Vec<String>> {
+    #[test]
+    fn test_recursive_let_parses_members_without_separators() {
+        assert_parse!(
+            "let { first = fn(n) later opl 4 left = fn(a, b) { a }
+                   opr 2 later = fn(a, b) b } first",
+            spanned(SyntaxExpr::LetRec(
+                vec![
+                    RecFn {
+                        name: spanned("first"),
+                        fixity: None,
+                        params: spanned(vec!["n"]),
+                        body: atom(Expr::Var("later")),
+                    },
+                    RecFn {
+                        name: spanned("left"),
+                        fixity: Some((OpAssoc::Left, 4)),
+                        params: spanned(vec!["a", "b"]),
+                        body: atom(Expr::Var("a")),
+                    },
+                    RecFn {
+                        name: spanned("later"),
+                        fixity: Some((OpAssoc::Right, 2)),
+                        params: spanned(vec!["a", "b"]),
+                        body: atom(Expr::Var("b")),
+                    },
+                ],
+                Box::new(atom(Expr::Var("first"))),
+            )),
+        );
+    }
+
+    #[test]
+    fn test_recursive_let_rejects_invalid_groups() {
+        for src in [
+            "let {} unit",
+            "let { f = 42 } unit",
+            "let { f = other } unit",
+            "let { f = fn() unit, g = fn() unit } unit",
+            "let { f = fn() unit }",
+        ] {
+            let toks = lex::lexer().parse(src).unwrap();
+            let (expr, _) = expr_and_item_parsers();
+            assert!(
+                expr.parse(
+                    toks.as_slice()
+                        .map((src.len()..src.len()).into(), |(t, s)| (t, s))
+                )
+                .has_errors(),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_recursive_let_reports_duplicate_at_second_name() {
+        let src = "let { f = fn() unit opr 2 f = fn(a, b) a } unit";
+        let duplicate = src.find("f = fn(a").unwrap();
         let toks = lex::lexer().parse(src).unwrap();
-        repl_item_parser()
+        let (expr, _) = expr_and_item_parsers();
+        let errors = expr
             .parse(
                 toks.as_slice()
                     .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
             )
-            .into_result()
-            .map_err(|errors| errors.into_iter().map(|error| error.to_string()).collect())
+            .into_errors();
+        assert!(
+            errors.iter().any(|error| {
+                error.span().into_range() == (duplicate..duplicate + 1)
+                    && error.to_string().contains("Duplicate name `f`")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_recursive_let_allows_shadowing_across_group_boundaries() {
+        let src = "let f = 0 let { f = fn() { let { f = fn() 1 } f } } let f = 2 f";
+        let toks = lex::lexer().parse(src).unwrap();
+        let (expr, _) = expr_and_item_parsers();
+        expr.parse(
+            toks.as_slice()
+                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+        )
+        .unwrap();
+    }
+
+    fn parse_repl_item(src: &str) -> Result<ReplItem<'_>, Vec<String>> {
+        let toks = lex::lexer().parse(src).unwrap();
+        let (_, item) = expr_and_item_parsers();
+        item.parse(
+            toks.as_slice()
+                .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
+        )
+        .into_result()
+        .map_err(|errors| errors.into_iter().map(|error| error.to_string()).collect())
     }
 
     #[test]
@@ -749,6 +887,23 @@ mod tests {
     }
 
     #[test]
+    fn test_repl_distinguishes_recursive_declarations_from_expressions() {
+        let declaration = "let { f = fn() { let x = 42 x } }";
+        let item = parse_repl_item(declaration).unwrap();
+        let ReplItem::LetRec(members) = item else {
+            panic!("Expected recursive let declaration, got {item:?}");
+        };
+        assert_eq!(members[0].name.0, "f");
+        assert!(matches!(members[0].body.0, SyntaxExpr::Let(..)));
+
+        let expression = format!("{declaration} f().");
+        assert!(matches!(
+            parse_repl_item(&expression),
+            Ok(ReplItem::Expr((SyntaxExpr::LetRec(..), _)))
+        ));
+    }
+
+    #[test]
     fn test_repl_item_accepts_ordinary_expressions_and_lets_with_bodies() {
         for (src, expected) in [
             ("42", atom(Expr::Lit(Value::Int(42)))),
@@ -775,13 +930,13 @@ mod tests {
         let src = "let x = 42";
         assert!(matches!(parse_repl_item(src), Ok(ReplItem::Let { .. })));
         let toks = lex::lexer().parse(src).unwrap();
+        let (expr, _) = expr_and_item_parsers();
         assert!(
-            expr_parser()
-                .parse(
-                    toks.as_slice()
-                        .map((src.len()..src.len()).into(), |(t, s)| (t, s))
-                )
-                .has_errors()
+            expr.parse(
+                toks.as_slice()
+                    .map((src.len()..src.len()).into(), |(t, s)| (t, s))
+            )
+            .has_errors()
         );
 
         for src in ["let x =", "{ let x = 42 }", "let x = 42 }"] {

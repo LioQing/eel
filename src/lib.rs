@@ -72,6 +72,7 @@ pub fn run(filename: impl AsRef<Path>) -> Result<(), RunError> {
         filename: filename.to_path_buf(),
         error,
     })?;
+
     let arena = typed_arena::Arena::new();
     let mut sources = SourceMap::new(&arena);
     let source = sources.add(filename.to_string_lossy().into_owned(), src);
@@ -85,7 +86,9 @@ pub fn run(filename: impl AsRef<Path>) -> Result<(), RunError> {
         }
     };
     let eoi = source.eof();
-    let (syntax, parse_errs) = parse::expr_parser()
+
+    let (expr, _) = parse::expr_and_item_parsers();
+    let (syntax, parse_errs) = expr
         .parse(toks.as_slice().map(eoi, |(t, s)| (t, s)))
         .into_output_errors();
 

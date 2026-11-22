@@ -8,27 +8,32 @@ macro_rules! builtin {
     ($name:literal $expr:ident $env:ident [$($param:ident),* $(,)?] => $body:expr) => {
         (
             $name,
-            Value::Closure(
-                Some($name),
-                None,
-                vec![$(stringify!($param)),*],
-                Box::new(Spanned::new(Expr::Builtin(|expr, env| {
-                    #[allow(unused_variables)]
-                    let $expr = expr;
-                    #[allow(unused_variables)]
-                    let $env = env;
-                    $(
-                        let $param = env.get(stringify!($param))
-                            .map(Rc::as_ref)
-                            .ok_or_else(|| Error {
-                                msg: format!("Variable `{}` not found", stringify!($param)),
-                                span: expr.1.clone(),
-                            })?;
-                    )*
-                    $body
-                }), 0..0)),
-                Default::default(),
-            ),
+            Value::Closure(Closure {
+                name: Some($name),
+                group: Rc::new(ClosureGroup {
+                    env: Default::default(),
+                    members: Box::new([ClosureDef {
+                        rec_name: None,
+                        params: vec![$(stringify!($param)),*],
+                        body: Rc::new(Spanned::new(Expr::Builtin(|expr, env| {
+                            #[allow(unused_variables)]
+                            let $expr = expr;
+                            #[allow(unused_variables)]
+                            let $env = env;
+                            $(
+                                let $param = env.get(stringify!($param))
+                                    .map(Rc::as_ref)
+                                    .ok_or_else(|| Error {
+                                        msg: format!("Variable `{}` not found", stringify!($param)),
+                                        span: expr.1.clone(),
+                                    })?;
+                            )*
+                            $body
+                        }), 0..0)),
+                    }]),
+                }),
+                member: 0,
+            }),
         )
     };
     ($name:literal $expr:ident $env:ident [$($param:ident),* $(,)?] in $body:literal) => {{
@@ -36,7 +41,8 @@ macro_rules! builtin {
 
         let toks = crate::lex::lexer().parse(src).unwrap();
 
-        let syntax = crate::parse::expr_parser()
+        let (expr, _) = crate::parse::expr_and_item_parsers();
+        let syntax = expr
             .parse(
                 toks.as_slice()
                     .map((src.len()..src.len()).into(), |(t, s)| (t, s)),
@@ -46,25 +52,30 @@ macro_rules! builtin {
 
         (
             $name,
-            Value::Closure(
-                Some($name),
-                None,
-                vec![$(stringify!($param)),*],
-                Box::new(Spanned::new(ast.0, 0..0)),
-                Default::default(),
-            ),
+            Value::Closure(Closure {
+                name: Some($name),
+                group: Rc::new(ClosureGroup {
+                    env: Default::default(),
+                    members: Box::new([ClosureDef {
+                        rec_name: None,
+                        params: vec![$(stringify!($param)),*],
+                        body: Rc::new(Spanned::new(ast.0, 0..0)),
+                    }]),
+                }),
+                member: 0,
+            }),
         )
     }}
 }
 
 pub fn body_at_call_site<'src>(
-    mut body: Box<Spanned<Expr<'src>>>,
+    mut body: Rc<Spanned<Expr<'src>>>,
     span: Span,
-) -> Box<Spanned<Expr<'src>>> {
+) -> Rc<Spanned<Expr<'src>>> {
     // Builtin bodies use an empty outer span to mark their internal source.
     // None of their descendant spans may be interpreted as user-source offsets.
     if body.1.end == 0 {
-        set_expr_span(&mut body, span);
+        set_expr_span(Rc::make_mut(&mut body), span);
     }
     body
 }
@@ -81,7 +92,7 @@ fn set_expr_span(expr: &mut Spanned<Expr<'_>>, span: Span) {
         }
         Expr::Fn(params, body) => {
             params.1 = span;
-            set_expr_span(body, span);
+            set_expr_span(Rc::make_mut(body), span);
         }
         Expr::Case(expr, arms) => {
             set_expr_span(expr, span);
@@ -98,6 +109,14 @@ fn set_expr_span(expr: &mut Spanned<Expr<'_>>, span: Span) {
         }
         Expr::Let(_, _, assign, body) => {
             set_expr_span(assign, span);
+            set_expr_span(body, span);
+        }
+        Expr::LetRec(bindings, body) => {
+            for binding in bindings {
+                binding.name.1 = span;
+                binding.params.1 = span;
+                set_expr_span(Rc::make_mut(&mut binding.body), span);
+            }
             set_expr_span(body, span);
         }
         Expr::Err | Expr::Lit(_) | Expr::Var(_) | Expr::Builtin(_) => {}
@@ -294,13 +313,18 @@ mod tests {
     ) -> (&'src str, Value<'src>) {
         (
             name,
-            Value::Closure(
-                Some(name),
-                None,
-                params,
-                Box::new((body.0, (0..0).into())),
-                Default::default(),
-            ),
+            Value::Closure(Closure {
+                name: Some(name),
+                group: Rc::new(ClosureGroup {
+                    env: Default::default(),
+                    members: Box::new([ClosureDef {
+                        rec_name: None,
+                        params,
+                        body: Rc::new((body.0, (0..0).into())),
+                    }]),
+                }),
+                member: 0,
+            }),
         )
     }
 
@@ -357,13 +381,18 @@ mod tests {
         assert_eq!(name, "b");
         assert_eq!(
             value,
-            Value::Closure(
-                Some("b"),
-                None,
-                vec!["a", "b"],
-                Box::new(expected),
-                Default::default()
-            )
+            Value::Closure(Closure {
+                name: Some("b"),
+                group: Rc::new(ClosureGroup {
+                    env: Default::default(),
+                    members: Box::new([ClosureDef {
+                        rec_name: None,
+                        params: vec!["a", "b"],
+                        body: Rc::new(expected),
+                    }]),
+                }),
+                member: 0,
+            })
         );
     }
 
@@ -479,7 +508,7 @@ mod tests {
                 ),
                 span,
             );
-            let function = (Expr::Fn((vec!["x", "y"], span), Box::new(case)), span);
+            let function = (Expr::Fn((vec!["x", "y"], span), Rc::new(case)), span);
             let apply = (
                 Expr::Call(Box::new(var("combine")), (vec![var("a"), var("b")], span)),
                 span,
@@ -492,28 +521,30 @@ mod tests {
         }
         let mut original = body((50..60).into());
         original.1 = (0..0).into();
+        let original = Rc::new(original);
         let call_span = (13..17).into();
 
         assert_eq!(
-            *body_at_call_site(Box::new(original), call_span),
+            *body_at_call_site(Rc::clone(&original), call_span),
             body(call_span),
         );
+        assert_eq!(original.1, (0..0).into());
         for expr in [
             Expr::Err,
             Expr::Lit(Value::Unit),
             Expr::Builtin(|_, _| Ok(Value::Unit)),
         ] {
-            let remapped = body_at_call_site(Box::new(spanned(expr)), call_span);
+            let remapped = body_at_call_site(Rc::new(spanned(expr)), call_span);
             assert_eq!(remapped.1, call_span);
         }
     }
 
     #[test]
     fn test_user_function_body_spans_are_preserved() {
-        let body = Box::new((
+        let body = Rc::new((
             Expr::Fn(
                 (vec!["x"], (2..5).into()),
-                Box::new((
+                Rc::new((
                     Expr::Call(
                         Box::new((Expr::Var("missing"), (8..15).into())),
                         (vec![(Expr::Var("x"), (16..17).into())], (15..18).into()),
@@ -523,7 +554,8 @@ mod tests {
             ),
             (0..20).into(),
         ));
-        assert_eq!(body_at_call_site(body.clone(), (30..34).into()), body);
+        let call_body = body_at_call_site(Rc::clone(&body), (30..34).into());
+        assert!(Rc::ptr_eq(&call_body, &body));
     }
 
     #[test]
@@ -542,7 +574,7 @@ mod tests {
         ));
         let body = spanned(Expr::Fn(
             (vec!["x"], (2..5).into()),
-            Box::new((
+            Rc::new((
                 Expr::Call(
                     Box::new((Expr::Var("missing_internal"), (8..24).into())),
                     (vec![(Expr::Var("x"), (25..26).into())], (24..27).into()),
@@ -762,7 +794,7 @@ mod tests {
             Box::new((
                 Expr::Fn(
                     spanned(vec!["x"]),
-                    Box::new((
+                    Rc::new((
                         Expr::Op(
                             Box::new(spanned(Expr::Var("x"))),
                             Box::new((Expr::Var("*"), (20..21).into())),
@@ -862,19 +894,24 @@ mod tests {
 
     #[test]
     fn test_inequality_rejects_unsupported_values() {
-        let closure = Value::Closure(
-            None,
-            None,
-            vec!["x"],
-            Box::new(spanned(Expr::Var("x"))),
-            Default::default(),
-        );
+        let closure = Value::Closure(Closure {
+            name: None,
+            group: Rc::new(ClosureGroup {
+                env: Default::default(),
+                members: Box::new([ClosureDef {
+                    rec_name: None,
+                    params: vec!["x"],
+                    body: Rc::new(spanned(Expr::Var("x"))),
+                }]),
+            }),
+            member: 0,
+        });
         let args: StructArgs<'_> =
             Rc::from([("a", Rc::new(Value::Int(1))), ("b", Rc::new(Value::Int(2)))]);
         let applied_env = args.iter().cloned().collect();
         let deferred = Value::Struct(
             Some("+"),
-            Box::new(spanned(Expr::Lit(Value::Int(3)))),
+            Rc::new(spanned(Expr::Lit(Value::Int(3)))),
             args,
             applied_env,
         );
@@ -931,7 +968,7 @@ mod tests {
     fn test_inequality_does_not_depend_on_shadowed_equality() {
         let equality = spanned(Expr::Fn(
             spanned(vec!["a", "b"]),
-            Box::new(spanned(Expr::Lit(Value::Int(0)))),
+            Rc::new(spanned(Expr::Lit(Value::Int(0)))),
         ));
         let inequality = applications("!=", Value::Int(1), Value::Int(1))[0]
             .0

@@ -71,6 +71,29 @@ associativity decides the grouping. Fixity follows lexical bindings, including
 recursive function bodies, and inner declarations do not affect outer or sibling
 expressions. A new binding without `opl` or `opr` uses the default fixity.
 
+### Recursive Function Groups
+
+Use `let { ... }` to define mutually recursive functions. Every function in the
+group can call itself or any other member, regardless of declaration order.
+
+```js
+let {
+    odd = fn(n) { case n { 0 => 0 _ => even(n - 1). } }
+    even = fn(n) { case n { 0 => 1 _ => odd(n - 1). } }
+}
+even(4).
+// 1
+```
+
+A group must contain at least one `fn` definition. Members need no separators,
+and their names must be distinct within the group. They can shadow outer names,
+and a parameter can shadow a group member in its own function body. As with
+plain `let`, the expression after the group can use its bindings.
+
+Each member can declare its own fixity, for example
+`opr 2 sub = fn(a, b) { a - b }` inside the braces. A member's fixity is visible
+throughout the group and in the following expression.
+
 ## Example
 
 Here is a simple [cons](https://en.wikipedia.org/wiki/Cons) implementation in Eel:
@@ -221,8 +244,9 @@ cargo run
 ```
 
 The REPL prints expression results and saves the last successful result as `it`.
-Use `let` to define a name for the rest of the session. Unlike a `let` in a file,
-a standalone REPL declaration does not need a body.
+Use a standalone `let` or `let { ... }` declaration to define names for the rest of
+the session without changing `it`. Unlike in a file, a standalone REPL declaration
+does not need a following expression.
 
 ```text
 eel> let x = 40

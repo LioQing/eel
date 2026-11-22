@@ -14,13 +14,14 @@ use crate::{
 };
 
 const HELP: &str = "\
-Enter an expression to evaluate it, or `let name = expression` to define a binding.
+Enter an expression to evaluate it, `let name = expression` to define a binding, 
+`let { foo = fn(...) ... bar = fn(...) ... }` to define a recursive function group.
 :help       Show this help
 :quit, :q   Exit the REPL
 :{          Begin multiline input
 :}          Evaluate the multiline input";
 
-pub(crate) fn run(
+pub fn run(
     mut input: impl BufRead,
     mut output: impl Write,
     mut diagnostics: impl Write,
@@ -125,7 +126,8 @@ impl<'src> Session<'src> {
         }
 
         let eoi = source.eof();
-        let item = parse::repl_item_parser()
+        let (_, item_parser) = parse::expr_and_item_parsers();
+        let item = item_parser
             .parse(toks.as_slice().map(eoi, |(t, s)| (t, s)))
             .into_result()
             .map_err(|errors| errors.into_iter().map(Into::into).collect::<Vec<_>>())?;
@@ -143,8 +145,14 @@ impl<'src> Session<'src> {
                 Ok(Some(value))
             }
             ReplItem::Let(op_spec, name, expr) => {
-                let (expr, specs) = fixity::resolve_binding(name, op_spec, expr, &self.specs);
+                let (expr, specs) = fixity::resolve_let(name, op_spec, expr, &self.specs);
                 interp::bind(name, &expr, &mut self.env).map_err(|err| vec![err.into()])?;
+                self.specs = specs;
+                Ok(None)
+            }
+            ReplItem::LetRec(members) => {
+                let (members, specs) = fixity::resolve_let_rec(members, &self.specs);
+                interp::bind_rec_group(&members, &mut self.env);
                 self.specs = specs;
                 Ok(None)
             }
@@ -231,6 +239,50 @@ mod tests {
         assert_result(&mut session, "10 sub 3 sub 2", 9);
         assert!(session.eval("let sub = -".into()).unwrap().is_none());
         assert_result(&mut session, "10 sub 3 sub 2", 5);
+    }
+
+    #[test]
+    fn test_session_installs_recursive_group_without_replacing_it() {
+        let arena = Arena::new();
+        let mut session = Session::new(&arena);
+        assert_result(&mut session, "42", 42);
+
+        let group = "let {
+            first = fn() { 10 sub 3 sub 2 }
+            opr 2 sub = fn(a, b) { a - b }
+        }";
+        assert!(session.eval(group.into()).unwrap().is_none());
+        assert_result(&mut session, "it", 42);
+        assert_result(&mut session, "first().", 9);
+        assert_result(&mut session, "10 sub 3 sub 2", 9);
+    }
+
+    #[test]
+    fn test_invalid_recursive_group_leaves_session_unchanged() {
+        let arena = Arena::new();
+        let mut session = Session::new(&arena);
+        session.eval("let opr 2 sub = -".into()).unwrap();
+        assert_result(&mut session, "42", 42);
+
+        for group in [
+            "let { opl 2 sub = fn(a, b) { a + b } fresh = fn() 0 sub = fn() 0 }",
+            "let { opl 2 sub = fn(a, b) { a + b } fresh = fn() 0 bad = 0 }",
+        ] {
+            assert!(session.eval(group.into()).is_err(), "{group}");
+        }
+
+        assert!(session.eval("fresh".into()).is_err());
+        assert_result(&mut session, "it", 42);
+        assert_result(&mut session, "10 sub 3 sub 2", 9);
+    }
+
+    #[test]
+    fn test_recursive_let_with_continuation_is_local_in_repl() {
+        let arena = Arena::new();
+        let mut session = Session::new(&arena);
+        assert_result(&mut session, "let { local = fn() 42 } local().", 42);
+        assert!(session.eval("local".into()).is_err());
+        assert!(session.eval("let x = let { f = fn() 42 }".into()).is_err());
     }
 
     #[test]

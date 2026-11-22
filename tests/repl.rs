@@ -57,6 +57,27 @@ sum(4).",
 }
 
 #[test]
+fn test_repl_persists_a_multiline_recursive_group_and_operator() {
+    let output = run_repl(
+        "\
+42
+:{
+let {
+    odd = fn(n) { case n { 0 => 0 _ => even(n - 1). } }
+    even = fn(n) { case n { 0 => 1 _ => odd(n - 1). } }
+    opr 2 sub = fn(a, b) { a - b }
+}
+:}
+it
+even(4).
+odd(4).
+10 sub 3 sub 2
+",
+    );
+    assert_success(&output, "42\n42\n1\n0\n9\n", "");
+}
+
+#[test]
 fn test_repl_recovers_from_errors_and_reports_the_original_definition() {
     let output = run_repl(
         "\

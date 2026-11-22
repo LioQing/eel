@@ -13,7 +13,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub(crate) struct Diagnostic {
+pub struct Diagnostic {
     span: Span,
     message: String,
     reason: String,
@@ -55,19 +55,19 @@ fn offset_span(span: Span, offset: usize) -> Span {
     (span.start + offset..span.end + offset).into()
 }
 
-pub(crate) struct Source<'src> {
+pub struct Source<'src> {
     name: String,
     text: &'src str,
     start: usize,
 }
 
 impl<'src> Source<'src> {
-    pub(crate) fn eof(&self) -> Span {
+    pub fn eof(&self) -> Span {
         let end = self.start + self.text.len();
         (end..end).into()
     }
 
-    pub(crate) fn lex(&self) -> Result<Vec<Spanned<Token<'src>>>, Vec<Diagnostic>> {
+    pub fn lex(&self) -> Result<Vec<Spanned<Token<'src>>>, Vec<Diagnostic>> {
         // Convert local lexer offsets before returning them to the caller.
         let mut tokens = lex::lexer()
             .parse(self.text)
@@ -111,20 +111,20 @@ impl<'src> Source<'src> {
 
 /// Gives each source a disjoint byte range so saved AST spans still identify
 /// their source even when evaluated by later REPL input.
-pub(crate) struct SourceMap<'src> {
+pub struct SourceMap<'src> {
     arena: &'src Arena<String>,
     entries: Vec<Source<'src>>,
 }
 
 impl<'src> SourceMap<'src> {
-    pub(crate) fn new(arena: &'src Arena<String>) -> Self {
+    pub fn new(arena: &'src Arena<String>) -> Self {
         Self {
             arena,
             entries: Vec::new(),
         }
     }
 
-    pub(crate) fn add(&mut self, name: String, text: String) -> &Source<'src> {
+    pub fn add(&mut self, name: String, text: String) -> &Source<'src> {
         // Leave the previous source's zero-width EOF span in its own range.
         let start = self.entries.last().map_or(0, |source| source.eof().end + 1);
         // ASTs borrow identifiers directly from input text.
@@ -133,7 +133,7 @@ impl<'src> SourceMap<'src> {
         self.entries.last().unwrap()
     }
 
-    pub(crate) fn write_diagnostics(
+    pub fn write_diagnostics(
         &self,
         errors: impl IntoIterator<Item = Diagnostic>,
         mut output: impl Write,
@@ -162,14 +162,16 @@ mod tests {
         sources.add("first".into(), "0".into());
         let source = sources.add("definition".into(), "fn() { // 🦀\n    missing\n}".into());
         let toks = source.lex().unwrap();
-        let syntax = parse::expr_parser()
+        let (expr, _) = parse::expr_and_item_parsers();
+        let syntax = expr
             .parse(toks.as_slice().map(source.eof(), |(t, s)| (t, s)))
             .unwrap();
         let closure = interp::eval(&fixity::resolve(syntax, &[]), builtin::env()).unwrap();
 
         let source = sources.add("call".into(), "f().".into());
         let toks = source.lex().unwrap();
-        let syntax = parse::expr_parser()
+        let (expr, _) = parse::expr_and_item_parsers();
+        let syntax = expr
             .parse(toks.as_slice().map(source.eof(), |(t, s)| (t, s)))
             .unwrap();
         let env = builtin::env().insert("f", std::rc::Rc::new(closure));
@@ -204,7 +206,8 @@ mod tests {
         sources.add("first".into(), "0".into());
         let source = sources.add("incomplete".into(), "let x =".into());
         let toks = source.lex().unwrap();
-        let errors = parse::expr_parser()
+        let (expr, _) = parse::expr_and_item_parsers();
+        let errors = expr
             .parse(toks.as_slice().map(source.eof(), |(t, s)| (t, s)))
             .into_errors();
         sources.add("next".into(), "42".into());

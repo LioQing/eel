@@ -112,3 +112,36 @@ fn test_file_mode_still_requires_a_let_body() {
     let file = SourceFile::new("let x = 42");
     assert_failure(&file.run(), "Parsing failed");
 }
+
+#[test]
+fn test_repl_runs_io_only_for_expression_results() {
+    let output = run_repl(
+        "\
+42
+let action = Io(print(7). bind fn(_) { eprint(8). } bind fn(_) { pure(9). })
+it
+action
+it + 1
+action
+",
+    );
+    assert_success(&output, "42\n42\n7\n9\n10\n7\n9\n", "8\n8\n");
+}
+
+#[test]
+fn test_repl_io_failure_preserves_it_and_the_original_error_location() {
+    let output = run_repl(
+        "\
+42
+let bad = fn(x) { missing }
+let action = Io(print(7). bind bad)
+action
+it
+",
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stdout, b"42\n7\n42\n");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("<repl:2>:1:19"), "{stderr}");
+    assert!(stderr.contains("Variable `missing` not found"), "{stderr}");
+}

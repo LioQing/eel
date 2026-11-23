@@ -7,12 +7,14 @@ use std::{
 use chumsky::prelude::*;
 
 use crate::declare::Spanned;
+use crate::io_action::ActionError;
 use crate::source::SourceMap;
 
 mod builtin;
 mod declare;
 mod fixity;
 mod interp;
+mod io_action;
 mod lex;
 mod parse;
 mod repl;
@@ -62,7 +64,7 @@ pub fn run_repl() -> io::Result<()> {
     repl::run(stdin.lock(), stdout, io::stderr(), show_prompt)
 }
 
-/// Runs a source file, printing its returned value or diagnostics.
+/// Runs a source file and any returned `Io` action, then displays the result.
 ///
 /// Returns an error if reading, lexing, parsing, evaluation, or output fails.
 /// Source diagnostics are written to stderr. Recovered tokens and expressions
@@ -102,11 +104,25 @@ pub fn run(filename: impl AsRef<Path>) -> Result<(), RunError> {
 
     let expr = fixity::resolve(syntax.ok_or(RunError::Parse)?, &[]);
 
-    match interp::eval(&expr, builtin::env()) {
-        Ok(v) => writeln!(io::stdout().lock(), "Returned: {v}").map_err(RunError::Output),
-        Err(e) => {
+    let mut output = io::stdout().lock();
+    let mut diagnostics = io::stderr().lock();
+
+    let result = interp::eval(&expr, builtin::env())
+        .map_err(ActionError::Runtime)
+        .and_then(|value| {
+            io_action::run_result(
+                Spanned::new(value, expr.span),
+                &mut output,
+                &mut diagnostics,
+            )
+        });
+
+    match result {
+        Ok(v) => writeln!(output, "Returned: {v}").map_err(RunError::Output),
+        Err(ActionError::Output(error)) => Err(RunError::Output(error)),
+        Err(ActionError::Runtime(e)) => {
             sources
-                .write_diagnostics([e.into()], io::stderr().lock())
+                .write_diagnostics([e.into()], &mut diagnostics)
                 .map_err(RunError::Output)?;
             Err(RunError::Runtime)
         }

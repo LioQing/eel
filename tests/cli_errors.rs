@@ -10,7 +10,7 @@ fn test_no_file_argument_exits_cleanly_on_eof() {
 
 #[test]
 fn test_extra_file_argument_fails_before_evaluation() {
-    let file = SourceFile::new("let _ = print(99). 0");
+    let file = SourceFile::new("Io(print(99).)");
     let output = cli().arg(&file.0).arg("unexpected").output().unwrap();
     assert_failure(&output, "Expected exactly one file argument");
 }
@@ -56,9 +56,9 @@ fn test_out_of_range_integer_fails_with_source_diagnostic() {
 #[test]
 fn test_lex_error_prevents_all_program_execution() {
     for source in [
-        "let _ = print(123456789). 9223372036854775808",
-        "let x = 9223372036854775808 let _ = print(123456789). 0",
-        "let _ = eprint(123456789). -9223372036854775809",
+        "Io(print(123456789). bind fn(_) { pure(9223372036854775808). })",
+        "let x = 9223372036854775808 Io(print(123456789).)",
+        "Io(eprint(123456789). bind fn(_) { pure(-9223372036854775809). })",
     ] {
         let file = SourceFile::new(source);
         let output = file.run();
@@ -90,7 +90,7 @@ fn test_empty_source_fails() {
 
 #[test]
 fn test_recovered_ast_is_not_evaluated() {
-    let file = SourceFile::new("let _ = print(99). { let x = }");
+    let file = SourceFile::new("Io(print(99). bind fn(_) { let x = })");
     let output = file.run();
     assert_failure(&output, "Parsing failed");
     assert_source_diagnostic(&output, &file.0);
@@ -130,13 +130,13 @@ fn test_success_preserves_returned_output_and_zero_status() {
 
 #[test]
 fn test_success_preserves_program_output() {
-    let output = SourceFile::new("let _ = print(99). 0").run();
+    let output = SourceFile::new("Io(print(99). bind fn(_) { pure(0). })").run();
     assert_success(&output, "99\nReturned: 0\n", "");
 }
 
 #[test]
 fn test_stderr_program_output_does_not_count_as_failure() {
-    let output = SourceFile::new("let _ = eprint(99). 0").run();
+    let output = SourceFile::new("Io(eprint(99). bind fn(_) { pure(0). })").run();
     assert_success(&output, "Returned: 0\n", "99\n");
 }
 

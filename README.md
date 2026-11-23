@@ -41,7 +41,7 @@ For examples:
 ## Features
 
 - **Explicit Evaluation**: Functions can be evaluated to structs, and structs can be evaluated to values.
-- **Functional**: Supports first-class functions and higher-order functions without mutable bindings. Eel is not completely side-effect-free: `print` and `eprint` perform observable I/O on standard output and standard error, respectively.
+- **Functional**: Supports first-class functions and higher-order functions without mutable bindings. Evaluation builds I/O actions as values without running them.
 - **Dynamically Typed**: Types are checked at runtime, allowing for flexibility in function definitions and calls.
 
 ### Integer Arithmetic
@@ -94,6 +94,32 @@ Each member can declare its own fixity, for example
 `opr 2 sub = fn(a, b) { a - b }` inside the braces. A member's fixity is visible
 throughout the group and in the following expression.
 
+### I/O Actions
+
+Return an `Io(plan)` struct from a file or a REPL expression to run `plan`:
+
+```js
+Io((fn(n) { pure(n + 1). })(5). bind print)
+// Prints 6 and returns unit.
+```
+
+The dot only evaluates an applied function. `pure(x).` builds a plan that
+returns `x` without I/O. `print(x).` and `eprint(x).` build plans that write `x`
+to standard output and standard error, respectively, and return `unit`.
+Eel evaluates function arguments as usual when building plans.
+
+`first bind next` builds a plan that runs `first`, then calls and evaluates
+the unary function `next` with that result. `next` must return another plan,
+not an `Io` wrapper. `bind` is left-associative by default, so several actions
+can be chained. The plans are ordinary structs named `Pure`, `Print`, `Eprint`,
+and `Bind`. The runner uses their names and positional arguments, not their
+bodies. Malformed plans are runtime errors when reached.
+
+Only a struct named `Io` returned directly by a file or REPL expression runs
+its plan. A discarded plan, an `Io` stored by a REPL `let`, or an `Io` nested
+inside another value does not run. An `Io` produced by running a plan is
+displayed as a result value, not run again.
+
 ## Example
 
 Here is a simple [cons](https://en.wikipedia.org/wiki/Cons) implementation in Eel:
@@ -120,16 +146,15 @@ let list = cons(1, cons(2, cons(3, nil())))
 let doubled_list = map(list, fn(x) { x * 2 }).
 let length_of_list = length(list).
 
-let _ = print(list).
+Io(
+    print(list).
 // cons (x=1, xs=cons (x=2, xs=cons (x=3, xs=nil() { unit }) { unit }) { unit }) { unit }
-
-let _ = print(doubled_list).
+    bind fn(_) { print(doubled_list). }
 // cons (x=2, xs=cons (x=4, xs=cons (x=6, xs=nil() { unit }) { unit }) { unit }) { unit }
-
-let _ = print(length_of_list).
+    bind fn(_) { print(length_of_list). }
 // 3
-
-0
+    bind fn(_) { pure(0). }
+)
 ```
 
 See more examples in the [examples](examples/) directory.
@@ -244,6 +269,7 @@ cargo run
 ```
 
 The REPL prints expression results and saves the last successful result as `it`.
+For an `Io` expression, this is the result of running the action.
 Use a standalone `let` or `let { ... }` declaration to define names for the rest of
 the session without changing `it`. Unlike in a file, a standalone REPL declaration
 does not need a following expression.

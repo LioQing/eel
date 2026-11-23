@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::declare::*;
 
-fn insert_group<'src>(group: &Rc<ClosureGroup<'src>>, env: &mut Env<'src>) {
+fn insert_recursive_bindings<'src>(env: &mut Env<'src>, group: &Rc<ClosureGroup<'src>>) {
     for (member, def) in group.members.iter().enumerate() {
         if let Some(name) = def.rec_name {
             let closure = Value::Closure(Closure {
@@ -15,17 +15,72 @@ fn insert_group<'src>(group: &Rc<ClosureGroup<'src>>, env: &mut Env<'src>) {
     }
 }
 
-fn closure_env<'src>(closure: &Closure<'src>) -> Env<'src> {
-    // The group owns definitions and the pre-binding snapshot, never its own
-    // closures. Recreate bindings with their original names, even through aliases.
-    let mut env = closure.group.env.clone();
-    insert_group(&closure.group, &mut env);
-    env
+fn insert_bindings<'src>(env: &mut Env<'src>, bindings: impl IntoIterator<Item = Binding<'src>>) {
+    for Binding { name, value } in bindings {
+        env.insert_mut(name, value);
+    }
 }
 
-fn extend_env<'src>(env: &mut Env<'src>, bindings: impl IntoIterator<Item = Binding<'src>>) {
-    for Binding { name, value } in bindings {
-        env.insert_mut(name, Rc::new(value));
+fn prepare_closure_call<'src>(
+    closure: &Closure<'src>,
+    args: impl ExactSizeIterator<Item = Result<Rc<Value<'src>>, Error>>,
+    call_span: Span,
+    callee_span: Span,
+) -> Result<Struct<'src>, Error> {
+    let name = closure.name;
+    let ClosureDef { params, body, .. } = closure.definition();
+    if params.len() != args.len() {
+        return Err(Error {
+            msg: format!(
+                "Expected {} arguments for function {}, but got {}",
+                params.len(),
+                name.map(|n| format!("`{n}`"))
+                    .unwrap_or_else(|| "<anonymous>".to_string()),
+                args.len(),
+            ),
+            span: call_span,
+        });
+    }
+
+    let body = crate::builtin::with_span(Rc::clone(body), callee_span);
+    let args: StructArgs<'src> = params
+        .iter()
+        .zip(args)
+        .map(|(name, arg)| Ok(Binding { name, value: arg? }))
+        .collect::<Result<_, _>>()?;
+
+    let mut applied_env = closure.group.env.clone();
+    insert_recursive_bindings(&mut applied_env, &closure.group);
+    insert_bindings(&mut applied_env, args.iter().cloned());
+
+    Ok(Struct {
+        name,
+        body,
+        args,
+        applied_env,
+    })
+}
+
+fn match_patt<'src>(patt: &Patt<'src>, value: &Rc<Value<'src>>) -> Option<Bindings<'src>> {
+    match (patt, value.as_ref()) {
+        (Patt::Lit(p), v) if p == v => Some(vec![]),
+        (Patt::Var(name), _) => Some(vec![Binding {
+            name,
+            value: Rc::clone(value),
+        }]),
+        (Patt::Struct(patt), Value::Struct(value)) if Some(patt.name) == value.name => {
+            if patt.args.value.len() != value.args.len() {
+                return None;
+            }
+
+            let mut bindings = vec![];
+            for (arg_patt, arg) in patt.args.value.iter().zip(value.args.iter()) {
+                bindings.extend(match_patt(&arg_patt.value, &arg.value)?);
+            }
+
+            Some(bindings)
+        }
+        _ => None,
     }
 }
 
@@ -57,10 +112,12 @@ pub fn bind<'src>(
             v
         }
     };
+
     env.insert_mut(x, Rc::new(v));
     Ok(())
 }
 
+/// Evaluates the expression in the old environment and installs it on success.
 pub fn bind_rec_group<'src>(members: &[RecFn<'src, Rc<Spanned<Expr<'src>>>>], env: &mut Env<'src>) {
     let group = Rc::new(ClosureGroup {
         env: env.clone(),
@@ -73,7 +130,20 @@ pub fn bind_rec_group<'src>(members: &[RecFn<'src, Rc<Spanned<Expr<'src>>>>], en
             })
             .collect(),
     });
-    insert_group(&group, env);
+
+    insert_recursive_bindings(env, &group);
+}
+
+/// Applies and evaluates a unary closure using an already evaluated argument.
+///
+/// Public so that [`io_action`](crate::io_action) can call it.
+pub fn eval_unary_closure<'src>(
+    closure: &Closure<'src>,
+    arg: Rc<Value<'src>>,
+    span: Span,
+) -> Result<Value<'src>, Error> {
+    let applied = prepare_closure_call(closure, std::iter::once(Ok(arg)), span, span)?;
+    eval(&applied.body, applied.applied_env)
 }
 
 pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'src>, Error> {
@@ -88,46 +158,14 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 span: expr.span,
             })?,
         Expr::Call(Call { callee, args }) => match eval(callee, env.clone())? {
-            Value::Closure(closure) => {
-                let name = closure.name;
-                let ClosureDef { params, body, .. } = closure.definition();
-                if params.len() != args.value.len() {
-                    return Err(Error {
-                        msg: format!(
-                            "Expected {} arguments for function {}, but got {}",
-                            params.len(),
-                            name.map(|n| format!("`{n}`"))
-                                .unwrap_or_else(|| "<anonymous>".to_string()),
-                            args.value.len(),
-                        ),
-                        span: expr.span,
-                    });
-                }
-
-                let body = crate::builtin::body_at_call_site(Rc::clone(body), callee.span);
-
-                let struct_args: StructArgs<'src> = params
+            Value::Closure(closure) => Value::Struct(prepare_closure_call(
+                &closure,
+                args.value
                     .iter()
-                    .zip(&args.value)
-                    .map(|(param, arg)| {
-                        Ok(StructArg {
-                            param,
-                            value: Rc::new(eval(arg, env.clone())?),
-                        })
-                    })
-                    .collect::<Result<_, _>>()?;
-
-                let mut applied_env = closure_env(&closure);
-                for StructArg { param, value } in struct_args.iter() {
-                    applied_env.insert_mut(*param, Rc::clone(value));
-                }
-                Value::Struct(Struct {
-                    name,
-                    body,
-                    args: struct_args,
-                    applied_env,
-                })
-            }
+                    .map(|arg| eval(arg, env.clone()).map(Rc::new)),
+                expr.span,
+                callee.span,
+            )?),
             Value::Struct(Struct {
                 name,
                 body,
@@ -168,9 +206,9 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
             member: 0,
         }),
         Expr::Case(Case { scrutinee, arms }) => {
-            let v = eval(scrutinee, env.clone())?;
+            let v = Rc::new(eval(scrutinee, env.clone())?);
 
-            let (patt_env, body) = arms
+            let (patt_bindings, body) = arms
                 .value
                 .iter()
                 .find_map(|CaseArm { patt, body }| {
@@ -182,7 +220,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 })?;
 
             let mut new_env = env;
-            extend_env(&mut new_env, patt_env);
+            insert_bindings(&mut new_env, patt_bindings);
 
             eval(body, new_env)?
         }
@@ -202,22 +240,23 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let body = crate::builtin::body_at_call_site(Rc::clone(body), op.span);
+                let body = crate::builtin::with_span(Rc::clone(body), op.span);
 
                 let arg1 = eval(lhs, env.clone())?;
                 let arg2 = eval(rhs, env.clone())?;
 
-                let mut new_env = closure_env(&closure);
-                extend_env(
+                let mut new_env = closure.group.env.clone();
+                insert_recursive_bindings(&mut new_env, &closure.group);
+                insert_bindings(
                     &mut new_env,
                     [
                         Binding {
                             name: params[0],
-                            value: arg1,
+                            value: Rc::new(arg1),
                         },
                         Binding {
                             name: params[1],
-                            value: arg2,
+                            value: Rc::new(arg2),
                         },
                     ],
                 );
@@ -247,29 +286,6 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
     })
 }
 
-pub fn match_patt<'src>(patt: &Patt<'src>, value: &Value<'src>) -> Option<Bindings<'src>> {
-    match (patt, value) {
-        (Patt::Lit(p), v) if p == v => Some(vec![]),
-        (Patt::Var(name), _) => Some(vec![Binding {
-            name,
-            value: value.clone(),
-        }]),
-        (Patt::Struct(patt), Value::Struct(value)) if Some(patt.name) == value.name => {
-            if patt.args.value.len() != value.args.len() {
-                return None;
-            }
-
-            let mut bindings = vec![];
-            for (arg_patt, arg) in patt.args.value.iter().zip(value.args.iter()) {
-                bindings.extend(match_patt(&arg_patt.value, &arg.value)?);
-            }
-
-            Some(bindings)
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::builtin;
@@ -282,11 +298,12 @@ mod tests {
 
     fn env_from<'src>(bindings: impl IntoIterator<Item = (&'src str, Value<'src>)>) -> Env<'src> {
         let mut env = Env::new();
-        extend_env(
+        insert_bindings(
             &mut env,
-            bindings
-                .into_iter()
-                .map(|(name, value)| Binding { name, value }),
+            bindings.into_iter().map(|(name, value)| Binding {
+                name,
+                value: Rc::new(value),
+            }),
         );
         env
     }
@@ -370,15 +387,13 @@ mod tests {
     fn struct_value<'src>(name: &'src str, args: Vec<(&'src str, Value<'src>)>) -> Value<'src> {
         let args: StructArgs<'src> = args
             .into_iter()
-            .map(|(param, value)| StructArg {
-                param,
+            .map(|(name, value)| Binding {
+                name,
                 value: Rc::new(value),
             })
             .collect();
-        let applied_env = args
-            .iter()
-            .map(|arg| (arg.param, Rc::clone(&arg.value)))
-            .collect();
+        let mut applied_env = Env::new();
+        insert_bindings(&mut applied_env, args.iter().cloned());
         Value::Struct(Struct {
             name: Some(name),
             body: Rc::new(spanned(Expr::Lit(Value::Unit))),
@@ -483,20 +498,24 @@ mod tests {
             Value::Struct(Struct {
                 name: Some("id"),
                 body: Rc::clone(&body),
-                args: Rc::from([StructArg {
-                    param: "y",
+                args: Rc::from([Binding {
+                    name: "y",
                     value: Rc::new(Value::Int(42))
                 }]),
                 applied_env: env_from([("id", id), ("y", Value::Int(42))]),
             }),
         );
         let Value::Struct(Struct {
-            body: applied_body, ..
+            body: applied_body,
+            args,
+            applied_env,
+            ..
         }) = value
         else {
             panic!("expected a struct");
         };
         assert!(Rc::ptr_eq(&applied_body, &body));
+        assert!(Rc::ptr_eq(&args[0].value, applied_env.get("y").unwrap()));
     }
 
     #[test]
@@ -511,8 +530,8 @@ mod tests {
                 Value::Struct(Struct {
                     name: Some("x_struct"),
                     body: Rc::new(var("x")),
-                    args: Rc::from([StructArg {
-                        param: "x",
+                    args: Rc::from([Binding {
+                        name: "x",
                         value: x_arg,
                     }]),
                     applied_env,
@@ -628,16 +647,16 @@ mod tests {
     #[test]
     fn test_op() {
         let mut env = builtin::env();
-        extend_env(
+        insert_bindings(
             &mut env,
             [
                 Binding {
                     name: "x",
-                    value: Value::Int(42),
+                    value: Rc::new(Value::Int(42)),
                 },
                 Binding {
                     name: "y",
-                    value: Value::Int(3),
+                    value: Rc::new(Value::Int(3)),
                 },
             ],
         );
@@ -697,16 +716,16 @@ mod tests {
     #[test]
     fn test_builtin() {
         let mut env = builtin::env();
-        extend_env(
+        insert_bindings(
             &mut env,
             [
                 Binding {
                     name: "x",
-                    value: Value::Int(42),
+                    value: Rc::new(Value::Int(42)),
                 },
                 Binding {
                     name: "y",
-                    value: Value::Int(3),
+                    value: Rc::new(Value::Int(3)),
                 },
             ],
         );
@@ -1073,7 +1092,7 @@ mod tests {
             let value = struct_value(name, args);
             for arg_patterns in patterns {
                 let pattern = struct_pattern(name, arg_patterns);
-                assert_eq!(match_patt(&pattern.value, &value), None);
+                assert_eq!(match_patt(&pattern.value, &Rc::new(value.clone())), None);
                 let expr = case(
                     spanned(Expr::Lit(value.clone())),
                     vec![(pattern, int(1)), (spanned(Patt::Var("_")), int(0))],
@@ -1087,7 +1106,10 @@ mod tests {
     fn test_struct_pattern_matches_zero_args() {
         let value = struct_value("empty", vec![]);
         let pattern = struct_pattern("empty", vec![]);
-        assert_eq!(match_patt(&pattern.value, &value), Some(vec![]));
+        assert_eq!(
+            match_patt(&pattern.value, &Rc::new(value.clone())),
+            Some(vec![])
+        );
         assert_eval(
             case(spanned(Expr::Lit(value)), vec![(pattern, int(1))]),
             Env::new(),
@@ -1102,19 +1124,26 @@ mod tests {
             "pair",
             vec![spanned(Patt::Var("a")), spanned(Patt::Var("b"))],
         );
+        let bindings = match_patt(&pattern.value, &Rc::new(value.clone())).unwrap();
         assert_eq!(
-            match_patt(&pattern.value, &value),
-            Some(vec![
+            bindings,
+            vec![
                 Binding {
                     name: "a",
-                    value: Value::Int(42)
+                    value: Rc::new(Value::Int(42)),
                 },
                 Binding {
                     name: "b",
-                    value: Value::Int(7)
-                }
-            ])
+                    value: Rc::new(Value::Int(7)),
+                },
+            ]
         );
+        let Value::Struct(pair) = &value else {
+            panic!("expected a struct");
+        };
+        for (binding, arg) in bindings.iter().zip(pair.args.iter()) {
+            assert!(Rc::ptr_eq(&binding.value, &arg.value));
+        }
         assert_eval(
             case(
                 spanned(Expr::Lit(value)),
@@ -1142,15 +1171,15 @@ mod tests {
             ],
         );
         assert_eq!(
-            match_patt(&pattern.value, &value),
+            match_patt(&pattern.value, &Rc::new(value.clone())),
             Some(vec![
                 Binding {
                     name: "a",
-                    value: Value::Int(7)
+                    value: Rc::new(Value::Int(7)),
                 },
                 Binding {
                     name: "b",
-                    value: Value::Int(42)
+                    value: Rc::new(Value::Int(42)),
                 }
             ])
         );
@@ -1184,7 +1213,7 @@ mod tests {
                     struct_pattern("inner", arg_patterns),
                 ],
             );
-            assert_eq!(match_patt(&pattern.value, &value), None);
+            assert_eq!(match_patt(&pattern.value, &Rc::new(value.clone())), None);
             let expr = case(
                 spanned(Expr::Lit(value.clone())),
                 vec![(pattern, int(1)), (spanned(Patt::Var("_")), var("tag"))],

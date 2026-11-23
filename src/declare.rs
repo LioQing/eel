@@ -539,7 +539,7 @@ mod fixity {
                         "{}({}) {{ {} }}",
                         name.unwrap_or(""),
                         args.iter()
-                            .map(|StructArg { param, value }| format!("{param}={value}"))
+                            .map(|Binding { name, value }| format!("{name}={value}"))
                             .collect::<Vec<_>>()
                             .join(", "),
                         body.value,
@@ -743,16 +743,10 @@ mod interp {
     #[derive(Debug, Clone, PartialEq)]
     pub struct Binding<'src> {
         pub name: &'src str,
-        pub value: Value<'src>,
+        pub value: Rc<Value<'src>>,
     }
 
     pub type Bindings<'src> = Vec<Binding<'src>>;
 
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct StructArg<'src> {
-        pub param: &'src str,
-        pub value: Rc<Value<'src>>,
-    }
-
-    pub type StructArgs<'src> = Rc<[StructArg<'src>]>;
+    pub type StructArgs<'src> = Rc<[Binding<'src>]>;
 }

@@ -9,7 +9,9 @@ use typed_arena::Arena;
 use crate::{
     builtin,
     declare::{Env, LetBinding, OpSpec, ReplItem, Spanned, Value},
-    fixity, interp, parse,
+    fixity, interp,
+    io_action::{self, ActionError},
+    parse,
     source::{Diagnostic, SourceMap},
 };
 
@@ -88,14 +90,21 @@ pub fn run(
             }
         };
 
-        match session.eval(code) {
+        match session.submit(code, &mut output, &mut diagnostics) {
             Ok(Some(value)) => writeln!(output, "{value}")?,
             Ok(None) => {}
-            Err(errors) => session
+            Err(SubmitError::Diagnostics(errors)) => session
                 .sources
                 .write_diagnostics(errors, &mut diagnostics)?,
+            Err(SubmitError::Output(error)) => return Err(error),
         }
     }
+}
+
+#[derive(Debug)]
+enum SubmitError {
+    Diagnostics(Vec<Diagnostic>),
+    Output(io::Error),
 }
 
 struct Session<'src> {
@@ -115,12 +124,17 @@ impl<'src> Session<'src> {
         }
     }
 
-    /// Returns a value only for expressions. The caller decides what to display.
-    fn eval(&mut self, input: String) -> Result<Option<Rc<Value<'src>>>, Vec<Diagnostic>> {
+    /// Runs any action returned by an expression before updating `it`.
+    fn submit(
+        &mut self,
+        input: String,
+        output: impl Write,
+        diagnostics: impl Write,
+    ) -> Result<Option<Rc<Value<'src>>>, SubmitError> {
         let name = format!("<repl:{}>", self.next_input);
         self.next_input += 1;
         let source = self.sources.add(name, input);
-        let toks = source.lex()?;
+        let toks = source.lex().map_err(SubmitError::Diagnostics)?;
         if toks.is_empty() {
             return Ok(None);
         }
@@ -130,23 +144,34 @@ impl<'src> Session<'src> {
         let item = item_parser
             .parse(toks.as_slice().map(eoi, Spanned::as_parts))
             .into_result()
-            .map_err(|errors| errors.into_iter().map(Into::into).collect::<Vec<_>>())?;
+            .map_err(|errors| {
+                SubmitError::Diagnostics(errors.into_iter().map(Into::into).collect())
+            })?;
 
         match item {
             ReplItem::Expr(expr) => {
                 let expr = fixity::resolve(expr, &self.specs);
-                let value =
-                    Rc::new(interp::eval(&expr, self.env.clone()).map_err(|err| vec![err.into()])?);
+                let value = interp::eval(&expr, self.env.clone())
+                    .map_err(|error| SubmitError::Diagnostics(vec![error.into()]))?;
+                let value = Spanned::new(value, expr.span);
+                let value = match io_action::run_result(value, output, diagnostics) {
+                    Ok(value) => Rc::new(value),
+                    Err(ActionError::Runtime(error)) => {
+                        return Err(SubmitError::Diagnostics(vec![error.into()]));
+                    }
+                    Err(ActionError::Output(error)) => return Err(SubmitError::Output(error)),
+                };
+
                 self.env.insert_mut("it", Rc::clone(&value));
 
                 // An implicit binding shadows any explicit fixity for `it`.
                 self.specs.retain(|spec| spec.name != "it");
-
                 Ok(Some(value))
             }
             ReplItem::Let(LetBinding { fixity, name, init }) => {
                 let (expr, specs) = fixity::resolve_let(name, fixity, init, &self.specs);
-                interp::bind(name, &expr, &mut self.env).map_err(|err| vec![err.into()])?;
+                interp::bind(name, &expr, &mut self.env)
+                    .map_err(|error| SubmitError::Diagnostics(vec![error.into()]))?;
                 self.specs = specs;
                 Ok(None)
             }
@@ -163,6 +188,20 @@ impl<'src> Session<'src> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn submit<'src>(
+        session: &mut Session<'src>,
+        input: &str,
+    ) -> Result<Option<Rc<Value<'src>>>, SubmitError> {
+        session.submit(input.into(), io::sink(), io::sink())
+    }
+
+    fn expect_diagnostics(session: &mut Session<'_>, input: &str) -> Vec<Diagnostic> {
+        match submit(session, input) {
+            Err(SubmitError::Diagnostics(errors)) => errors,
+            other => panic!("expected diagnostics for {input:?}, got {other:?}"),
+        }
+    }
 
     fn run_with_input(input: &str, show_prompt: bool) -> (String, String) {
         let mut output = Vec::new();
@@ -211,8 +250,16 @@ mod tests {
         assert!(diagnostics.contains("Unterminated multiline input: expected :}"));
     }
 
+    #[test]
+    fn test_io_actions_write_to_the_repl_writers() {
+        let (output, diagnostics) =
+            run_with_input("Io(print(1). bind fn(_) { eprint(2). })\n", false);
+        assert_eq!(output, "1\nunit\n");
+        assert_eq!(diagnostics, "2\n");
+    }
+
     fn assert_result(session: &mut Session<'_>, input: &str, expected: i64) {
-        let result = session.eval(input.into()).unwrap();
+        let result = submit(session, input).unwrap();
         assert_eq!(result.as_deref(), Some(&Value::Int(expected)));
     }
 
@@ -220,12 +267,12 @@ mod tests {
     fn test_session_persists_bindings_and_last_successful_expression() {
         let arena = Arena::new();
         let mut session = Session::new(&arena);
-        assert!(session.eval("it".into()).is_err());
-        assert!(session.eval("let x = 40".into()).unwrap().is_none());
+        expect_diagnostics(&mut session, "it");
+        assert!(submit(&mut session, "let x = 40").unwrap().is_none());
         assert_result(&mut session, "x + 2", 42);
-        assert!(session.eval("let x = x + 1".into()).unwrap().is_none());
+        assert!(submit(&mut session, "let x = x + 1").unwrap().is_none());
         for input in ["let x = 9223372036854775808", "let x =", "let x = 1 / 0"] {
-            assert!(session.eval(input.into()).is_err(), "{input}");
+            expect_diagnostics(&mut session, input);
         }
         assert_result(&mut session, "x + it", 83);
     }
@@ -234,10 +281,10 @@ mod tests {
     fn test_session_commits_fixity_only_after_successful_binding() {
         let arena = Arena::new();
         let mut session = Session::new(&arena);
-        assert!(session.eval("let opr 1 sub = -".into()).unwrap().is_none());
-        assert!(session.eval("let sub = missing".into()).is_err());
+        assert!(submit(&mut session, "let opr 1 sub = -").unwrap().is_none());
+        expect_diagnostics(&mut session, "let sub = missing");
         assert_result(&mut session, "10 sub 3 sub 2", 9);
-        assert!(session.eval("let sub = -".into()).unwrap().is_none());
+        assert!(submit(&mut session, "let sub = -").unwrap().is_none());
         assert_result(&mut session, "10 sub 3 sub 2", 5);
     }
 
@@ -251,7 +298,7 @@ mod tests {
             first = fn() { 10 sub 3 sub 2 }
             opr 2 sub = fn(a, b) { a - b }
         }";
-        assert!(session.eval(group.into()).unwrap().is_none());
+        assert!(submit(&mut session, group).unwrap().is_none());
         assert_result(&mut session, "it", 42);
         assert_result(&mut session, "first().", 9);
         assert_result(&mut session, "10 sub 3 sub 2", 9);
@@ -261,17 +308,17 @@ mod tests {
     fn test_invalid_recursive_group_leaves_session_unchanged() {
         let arena = Arena::new();
         let mut session = Session::new(&arena);
-        session.eval("let opr 2 sub = -".into()).unwrap();
+        submit(&mut session, "let opr 2 sub = -").unwrap();
         assert_result(&mut session, "42", 42);
 
         for group in [
             "let { opl 2 sub = fn(a, b) { a + b } fresh = fn() 0 sub = fn() 0 }",
             "let { opl 2 sub = fn(a, b) { a + b } fresh = fn() 0 bad = 0 }",
         ] {
-            assert!(session.eval(group.into()).is_err(), "{group}");
+            expect_diagnostics(&mut session, group);
         }
 
-        assert!(session.eval("fresh".into()).is_err());
+        expect_diagnostics(&mut session, "fresh");
         assert_result(&mut session, "it", 42);
         assert_result(&mut session, "10 sub 3 sub 2", 9);
     }
@@ -281,16 +328,16 @@ mod tests {
         let arena = Arena::new();
         let mut session = Session::new(&arena);
         assert_result(&mut session, "let { local = fn() 42 } local().", 42);
-        assert!(session.eval("local".into()).is_err());
-        assert!(session.eval("let x = let { f = fn() 42 }".into()).is_err());
+        expect_diagnostics(&mut session, "local");
+        expect_diagnostics(&mut session, "let x = let { f = fn() 42 }");
     }
 
     #[test]
     fn test_implicit_it_shadows_explicit_fixity() {
         let arena = Arena::new();
         let mut session = Session::new(&arena);
-        assert!(session.eval("let opr 1 it = -".into()).unwrap().is_none());
-        assert!(session.eval("-".into()).unwrap().is_some());
+        assert!(submit(&mut session, "let opr 1 it = -").unwrap().is_none());
+        assert!(submit(&mut session, "-").unwrap().is_some());
         assert_result(&mut session, "10 it 3 it 2", 5);
     }
 
@@ -299,12 +346,12 @@ mod tests {
         let arena = Arena::new();
         let mut session = Session::new(&arena);
         assert_result(&mut session, "40", 40);
-        session.eval("let old = fn() { it + 2 }".into()).unwrap();
+        submit(&mut session, "let old = fn() { it + 2 }").unwrap();
         assert_result(&mut session, "0", 0);
         assert_result(&mut session, "old().", 42);
 
-        session.eval("let bad = fn() { missing }".into()).unwrap();
-        let errors = session.eval("bad().".into()).unwrap_err();
+        submit(&mut session, "let bad = fn() { missing }").unwrap();
+        let errors = expect_diagnostics(&mut session, "bad().");
         let mut output = Vec::new();
         session
             .sources

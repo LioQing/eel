@@ -66,84 +66,101 @@ macro_rules! builtin {
     }}
 }
 
-pub fn body_at_call_site<'src>(
-    mut body: Rc<Spanned<Expr<'src>>>,
-    span: Span,
-) -> Rc<Spanned<Expr<'src>>> {
+pub fn with_span<'src>(mut body: Rc<Spanned<Expr<'src>>>, span: Span) -> Rc<Spanned<Expr<'src>>> {
+    fn set_expr_span(expr: &mut Spanned<Expr<'_>>, span: Span) {
+        expr.span = span;
+        match &mut expr.value {
+            Expr::Call(Call { callee, args }) => {
+                set_expr_span(callee, span);
+                args.span = span;
+                for arg in &mut args.value {
+                    set_expr_span(arg, span);
+                }
+            }
+            Expr::Fn(FnExpr { params, body }) => {
+                params.span = span;
+                set_expr_span(Rc::make_mut(body), span);
+            }
+            Expr::Case(Case { scrutinee, arms }) => {
+                set_expr_span(scrutinee, span);
+                arms.span = span;
+                for CaseArm { patt, body } in &mut arms.value {
+                    set_patt_span(patt, span);
+                    set_expr_span(body, span);
+                }
+            }
+            Expr::Op(Op { lhs, op, rhs }) => {
+                set_expr_span(lhs, span);
+                set_expr_span(op, span);
+                set_expr_span(rhs, span);
+            }
+            Expr::Let(Let { init, body, .. }) => {
+                set_expr_span(init, span);
+                set_expr_span(body, span);
+            }
+            Expr::LetRec(LetRec { bindings, body }) => {
+                for binding in bindings {
+                    binding.name.span = span;
+                    binding.params.span = span;
+                    set_expr_span(Rc::make_mut(&mut binding.body), span);
+                }
+                set_expr_span(body, span);
+            }
+            Expr::Err | Expr::Lit(_) | Expr::Var(_) | Expr::Builtin(_) => {}
+        }
+    }
+
+    fn set_patt_span(patt: &mut Spanned<Patt<'_>>, span: Span) {
+        patt.span = span;
+        match &mut patt.value {
+            Patt::Struct(StructPatt { args, .. }) => {
+                args.span = span;
+                for arg in &mut args.value {
+                    set_patt_span(arg, span);
+                }
+            }
+            Patt::Var(_) | Patt::Lit(_) => {}
+        }
+    }
+
     // Builtin bodies use an empty outer span to mark their internal source.
     // None of their descendant spans may be interpreted as user-source offsets.
     if body.span.end == 0 {
         set_expr_span(Rc::make_mut(&mut body), span);
     }
+
     body
 }
 
-fn set_expr_span(expr: &mut Spanned<Expr<'_>>, span: Span) {
-    expr.span = span;
-    match &mut expr.value {
-        Expr::Call(Call { callee, args }) => {
-            set_expr_span(callee, span);
-            args.span = span;
-            for arg in &mut args.value {
-                set_expr_span(arg, span);
-            }
-        }
-        Expr::Fn(FnExpr { params, body }) => {
-            params.span = span;
-            set_expr_span(Rc::make_mut(body), span);
-        }
-        Expr::Case(Case { scrutinee, arms }) => {
-            set_expr_span(scrutinee, span);
-            arms.span = span;
-            for CaseArm { patt, body } in &mut arms.value {
-                set_patt_span(patt, span);
-                set_expr_span(body, span);
-            }
-        }
-        Expr::Op(Op { lhs, op, rhs }) => {
-            set_expr_span(lhs, span);
-            set_expr_span(op, span);
-            set_expr_span(rhs, span);
-        }
-        Expr::Let(Let { init, body, .. }) => {
-            set_expr_span(init, span);
-            set_expr_span(body, span);
-        }
-        Expr::LetRec(LetRec { bindings, body }) => {
-            for binding in bindings {
-                binding.name.span = span;
-                binding.params.span = span;
-                set_expr_span(Rc::make_mut(&mut binding.body), span);
-            }
-            set_expr_span(body, span);
-        }
-        Expr::Err | Expr::Lit(_) | Expr::Var(_) | Expr::Builtin(_) => {}
-    }
-}
-
-fn set_patt_span(patt: &mut Spanned<Patt<'_>>, span: Span) {
-    patt.span = span;
-    match &mut patt.value {
-        Patt::Struct(StructPatt { args, .. }) => {
-            args.span = span;
-            for arg in &mut args.value {
-                set_patt_span(arg, span);
-            }
-        }
-        Patt::Var(_) | Patt::Lit(_) => {}
-    }
-}
-
 pub fn env<'src>() -> Env<'src> {
+    fn action<'src>(name: &'static str, body_span: Span, args: StructArgs<'src>) -> Value<'src> {
+        let applied_env = args
+            .iter()
+            .map(|arg| (arg.name, Rc::clone(&arg.value)))
+            .collect();
+        Value::Struct(Struct {
+            name: Some(name),
+            body: Rc::new(Spanned::new(Expr::Lit(Value::Unit), body_span)),
+            args,
+            applied_env,
+        })
+    }
+
     [
-        builtin!("print" expr env [v] => {
-            println!("{v}");
-            Ok(v.clone())
-        }),
-        builtin!("eprint" expr env [v] => {
-            eprintln!("{v}");
-            Ok(v.clone())
-        }),
+        builtin!("Io" expr env [plan] => Ok(plan.clone())),
+        builtin!("pure" expr env [value] => Ok(action("Pure", expr.span, Rc::from([
+            Binding { name: "value", value: Rc::new(value.clone()) },
+        ])))),
+        builtin!("print" expr env [value] => Ok(action("Print", expr.span, Rc::from([
+            Binding { name: "value", value: Rc::new(value.clone()) },
+        ])))),
+        builtin!("eprint" expr env [value] => Ok(action("Eprint", expr.span, Rc::from([
+            Binding { name: "value", value: Rc::new(value.clone()) },
+        ])))),
+        builtin!("bind" expr env [plan, next] => Ok(action("Bind", expr.span, Rc::from([
+            Binding { name: "plan", value: Rc::new(plan.clone()) },
+            Binding { name: "next", value: Rc::new(next.clone()) },
+        ])))),
         builtin!("+" expr env [a, b] => {
             match (a, b) {
                 (Value::Int(a), Value::Int(b)) => a.checked_add(*b)
@@ -577,17 +594,14 @@ mod tests {
         let original = Rc::new(original);
         let call_span = (13..17).into();
 
-        assert_eq!(
-            *body_at_call_site(Rc::clone(&original), call_span),
-            body(call_span),
-        );
+        assert_eq!(*with_span(Rc::clone(&original), call_span), body(call_span),);
         assert_eq!(original.span, (0..0).into());
         for expr in [
             Expr::Err,
             Expr::Lit(Value::Unit),
             Expr::Builtin(|_, _| Ok(Value::Unit)),
         ] {
-            let remapped = body_at_call_site(Rc::new(spanned(expr)), call_span);
+            let remapped = with_span(Rc::new(spanned(expr)), call_span);
             assert_eq!(remapped.span, call_span);
         }
     }
@@ -607,7 +621,7 @@ mod tests {
             ),
             0..20,
         ));
-        let call_body = body_at_call_site(Rc::clone(&body), (30..34).into());
+        let call_body = with_span(Rc::clone(&body), (30..34).into());
         assert!(Rc::ptr_eq(&call_body, &body));
     }
 
@@ -948,18 +962,18 @@ mod tests {
             member: 0,
         });
         let args: StructArgs<'_> = Rc::from([
-            StructArg {
-                param: "a",
+            Binding {
+                name: "a",
                 value: Rc::new(Value::Int(1)),
             },
-            StructArg {
-                param: "b",
+            Binding {
+                name: "b",
                 value: Rc::new(Value::Int(2)),
             },
         ]);
         let applied_env = args
             .iter()
-            .map(|arg| (arg.param, Rc::clone(&arg.value)))
+            .map(|arg| (arg.name, Rc::clone(&arg.value)))
             .collect();
         let deferred = Value::Struct(Struct {
             name: Some("+"),
@@ -1009,7 +1023,7 @@ mod tests {
             let result = interp::eval(&expr, env());
             assert!(
                 matches!(result, Ok(Value::Struct(Struct { name: Some("!="), ref args, .. }))
-                    if args.iter().map(|arg| (arg.param, arg.value.as_ref()))
+                    if args.iter().map(|arg| (arg.name, arg.value.as_ref()))
                         .eq([("a", &Value::Int(1)), ("b", &value)])),
                 "{expr:?}: {result:?}"
             );

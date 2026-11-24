@@ -6,12 +6,14 @@ use std::{
 use chumsky::prelude::*;
 use typed_arena::Arena;
 
-use crate::{
+use crate::lang::{
     builtin,
     declare::{Env, LetBinding, OpSpec, ReplItem, Spanned, Value},
-    fixity, interp,
+    fixity, interp, parse,
+};
+
+use super::{
     io_action::{self, ActionError},
-    parse,
     source::{Diagnostic, SourceMap},
 };
 

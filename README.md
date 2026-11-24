@@ -117,8 +117,9 @@ bodies. Malformed plans are runtime errors when reached.
 
 Only a struct named `Io` returned directly by a file or REPL expression runs
 its plan. A discarded plan, an `Io` stored by a REPL `let`, or an `Io` nested
-inside another value does not run. An `Io` produced by running a plan is
-displayed as a result value, not run again.
+inside another value does not run. An `Io` produced by running a plan is not
+run again. The REPL displays it as a value, while the file runner rejects it
+as an invalid exit code.
 
 ## Example
 
@@ -148,11 +149,14 @@ let length_of_list = length(list).
 
 Io(
     print(list).
-// cons (x=1, xs=cons (x=2, xs=cons (x=3, xs=nil() { unit }) { unit }) { unit }) { unit }
+    // cons (x=1, xs=cons (x=2, xs=cons (x=3, xs=nil() { unit }) { unit }) { unit }) { unit }
+
     bind fn(_) { print(doubled_list). }
-// cons (x=2, xs=cons (x=4, xs=cons (x=6, xs=nil() { unit }) { unit }) { unit }) { unit }
+    // cons (x=2, xs=cons (x=4, xs=cons (x=6, xs=nil() { unit }) { unit }) { unit }) { unit }
+
     bind fn(_) { print(length_of_list). }
-// 3
+    // 3
+
     bind fn(_) { pure(0). }
 )
 ```
@@ -261,6 +265,12 @@ Run a file by passing its path:
 ```bash
 cargo run -- <path-to-file>
 ```
+
+The file's final result, after running any top-level `Io` action, is its exit
+code. It must be an integer from `0` to `255`, or `unit` for exit code `0`.
+Invalid results produce a diagnostic and exit with code `1`. The file runner
+does not print the final result. Use `Io(print(value).)` to print a value and
+exit with code `0`.
 
 Start the interactive interpreter (REPL) without a path:
 

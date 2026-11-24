@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::declare::*;
+use super::{builtin, declare::*};
 
 fn insert_recursive_bindings<'src>(env: &mut Env<'src>, group: &Rc<ClosureGroup<'src>>) {
     for (member, def) in group.members.iter().enumerate() {
@@ -42,7 +42,7 @@ fn prepare_closure_call<'src>(
         });
     }
 
-    let body = crate::builtin::with_span(Rc::clone(body), callee_span);
+    let body = builtin::with_span(Rc::clone(body), callee_span);
     let args: StructArgs<'src> = params
         .iter()
         .zip(args)
@@ -136,7 +136,7 @@ pub fn bind_rec_group<'src>(members: &[RecFn<'src, Rc<Spanned<Expr<'src>>>>], en
 
 /// Applies and evaluates a unary closure using an already evaluated argument.
 ///
-/// Public so that [`io_action`](crate::io_action) can call it.
+/// Used by the runners to evaluate I/O plan continuations.
 pub fn eval_unary_closure<'src>(
     closure: &Closure<'src>,
     arg: Rc<Value<'src>>,
@@ -240,7 +240,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                     });
                 }
 
-                let body = crate::builtin::with_span(Rc::clone(body), op.span);
+                let body = builtin::with_span(Rc::clone(body), op.span);
 
                 let arg1 = eval(lhs, env.clone())?;
                 let arg2 = eval(rhs, env.clone())?;
@@ -288,8 +288,6 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
 
 #[cfg(test)]
 mod tests {
-    use crate::builtin;
-
     use super::*;
 
     fn spanned<T: Clone>(value: T) -> Spanned<T> {

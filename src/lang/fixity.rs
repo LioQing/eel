@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::declare::*;
+use super::declare::*;
 
 fn op_fixity(op: &Spanned<Expr<'_>>, specs: &[OpSpec<'_>]) -> Fixity {
     if let Expr::Var(name) = &op.value {
@@ -358,8 +358,8 @@ mod tests {
         use chumsky::prelude::*;
 
         let src = "case f(1) { x => x }";
-        let tokens = crate::lex::lexer().parse(src).unwrap();
-        let (parser, _) = crate::parse::expr_and_item_parsers();
+        let tokens = crate::lang::lex::lexer().parse(src).unwrap();
+        let (parser, _) = crate::lang::parse::expr_and_item_parsers();
         let syntax = parser
             .parse(
                 tokens

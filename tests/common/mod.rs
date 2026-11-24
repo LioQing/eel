@@ -57,7 +57,12 @@ pub fn run_file(path: impl AsRef<Path>) -> Output {
 
 #[track_caller]
 pub fn assert_success(output: &Output, expected_stdout: &str, expected_stderr: &str) {
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_exit(output, 0, expected_stdout, expected_stderr);
+}
+
+#[track_caller]
+pub fn assert_exit(output: &Output, code: u8, expected_stdout: &str, expected_stderr: &str) {
+    assert_eq!(output.status.code(), Some(i32::from(code)), "{output:?}");
     assert_eq!(
         std::str::from_utf8(&output.stdout).unwrap(),
         expected_stdout,
@@ -76,7 +81,6 @@ pub fn assert_failure(output: &Output, diagnostic: &str) {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(stderr.contains(diagnostic), "{stderr}");
     assert!(!stderr.contains("panicked"), "{stderr}");
-    assert!(!stderr.contains("Returned:"), "{stderr}");
     assert!(output.stdout.is_empty(), "{output:?}");
 }
 
@@ -88,6 +92,6 @@ pub fn assert_source_diagnostic(output: &Output, path: &Path) {
 
 #[track_caller]
 pub fn assert_returned(source: &str, expected: i64) {
-    let output = SourceFile::new(source).run();
-    assert_success(&output, &format!("Returned: {expected}\n"), "");
+    let output = SourceFile::new(format!("Io(print({{\n{source}\n}}).)")).run();
+    assert_success(&output, &format!("{expected}\n"), "");
 }

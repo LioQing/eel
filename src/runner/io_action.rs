@@ -3,7 +3,7 @@ use std::{
     rc::Rc,
 };
 
-use crate::{declare::*, interp};
+use crate::lang::{declare::*, interp};
 
 #[derive(Debug)]
 pub enum ActionError {

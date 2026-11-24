@@ -1,6 +1,6 @@
 use chumsky::prelude::*;
 
-use crate::declare::*;
+use super::declare::*;
 
 pub fn lexer<'src>()
 -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, Span>>> {

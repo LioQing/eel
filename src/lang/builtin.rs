@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::declare::*;
+use super::declare::*;
 
 macro_rules! builtin {
     ($name:literal $expr:ident $env:ident [$($param:ident),* $(,)?] => $body:expr) => {
@@ -37,16 +37,16 @@ macro_rules! builtin {
     ($name:literal $expr:ident $env:ident [$($param:ident),* $(,)?] in $body:literal) => {{
         let src = $body;
 
-        let toks = crate::lex::lexer().parse(src).unwrap();
+        let toks = crate::lang::lex::lexer().parse(src).unwrap();
 
-        let (expr, _) = crate::parse::expr_and_item_parsers();
+        let (expr, _) = crate::lang::parse::expr_and_item_parsers();
         let syntax = expr
             .parse(
                 toks.as_slice()
                     .map((src.len()..src.len()).into(), Spanned::as_parts),
             )
             .unwrap();
-        let ast = crate::fixity::resolve(syntax, &[]);
+        let ast = crate::lang::fixity::resolve(syntax, &[]);
 
         (
             $name,
@@ -309,7 +309,7 @@ mod tests {
     use chumsky::prelude::*;
 
     use super::*;
-    use crate::interp;
+    use crate::lang::interp;
 
     fn spanned<T: Clone>(value: T) -> Spanned<T> {
         Spanned::new(value, 0..0)

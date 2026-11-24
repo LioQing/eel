@@ -7,7 +7,7 @@ use ariadne::{Color, Label, Report, ReportKind, Source as ReportSource};
 use chumsky::prelude::*;
 use typed_arena::Arena;
 
-use crate::{
+use crate::lang::{
     declare::{Error, Span, Spanned, Token},
     lex,
 };
@@ -21,6 +21,15 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
+    pub fn new(span: Span, message: String) -> Self {
+        Self {
+            span,
+            reason: message.clone(),
+            message,
+            contexts: Vec::new(),
+        }
+    }
+
     fn from_rich(error: Rich<'_, impl fmt::Display>, offset: usize) -> Self {
         Self {
             span: offset_span(*error.span(), offset),
@@ -42,12 +51,7 @@ impl<T: fmt::Display> From<Rich<'_, T>> for Diagnostic {
 
 impl From<Error> for Diagnostic {
     fn from(error: Error) -> Self {
-        Self {
-            span: error.span,
-            message: error.msg.clone(),
-            reason: error.msg,
-            contexts: Vec::new(),
-        }
+        Self::new(error.span, error.msg)
     }
 }
 
@@ -153,7 +157,7 @@ impl<'src> SourceMap<'src> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{builtin, fixity, interp, parse};
+    use crate::lang::{builtin, fixity, interp, parse};
 
     #[test]
     fn runtime_diagnostic_uses_the_original_source_and_byte_offsets() {

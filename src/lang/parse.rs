@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use chumsky::{input::ValueInput, prelude::*};
 
-use crate::declare::*;
+use super::declare::*;
 
 /// Builds the expression and REPL item parsers from the same grammar.
 pub fn expr_and_item_parsers<
@@ -280,7 +280,7 @@ mod tests {
 
     use super::*;
 
-    use crate::lex;
+    use crate::lang::lex;
 
     fn spanned<T: Clone>(value: T) -> Spanned<T> {
         Spanned::new(value, 0..0)

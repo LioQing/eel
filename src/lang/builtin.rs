@@ -77,6 +77,7 @@ pub fn with_span<'src>(mut body: Rc<Spanned<Expr<'src>>>, span: Span) -> Rc<Span
                     set_expr_span(arg, span);
                 }
             }
+            Expr::Eval(operand) => set_expr_span(operand, span),
             Expr::Fn(FnExpr { params, body }) => {
                 params.span = span;
                 set_expr_span(Rc::make_mut(body), span);
@@ -325,6 +326,10 @@ mod tests {
         }))
     }
 
+    fn evaluate(operand: Spanned<Expr<'_>>) -> Spanned<Expr<'_>> {
+        spanned(Expr::Eval(Box::new(operand)))
+    }
+
     fn var(name: &str, span: std::ops::Range<usize>) -> Spanned<Expr<'_>> {
         Spanned::new(Expr::Var(name), span)
     }
@@ -416,10 +421,7 @@ mod tests {
             Spanned::new(Expr::Var(name), infix_span),
             args[1].clone(),
         ));
-        let prefix = call(
-            call(Spanned::new(Expr::Var(name), prefix_span), args),
-            vec![],
-        );
+        let prefix = evaluate(call(Spanned::new(Expr::Var(name), prefix_span), args));
         [(infix, infix_span), (prefix, prefix_span)]
     }
 
@@ -477,17 +479,14 @@ mod tests {
             var("b", 2..3),
             spanned(Expr::Lit(Value::Int(2))),
         ));
-        let prefix = call(
-            call(
-                var("b", 0..1),
-                vec![
-                    spanned(Expr::Lit(Value::Int(1))),
-                    spanned(Expr::Lit(Value::Int(2))),
-                ],
-            ),
-            vec![],
-        );
-        for (src, expr, span) in [("1 b 2", infix, 2..3), ("b(1, 2)()", prefix, 0..1)] {
+        let prefix = evaluate(call(
+            var("b", 0..1),
+            vec![
+                spanned(Expr::Lit(Value::Int(1))),
+                spanned(Expr::Lit(Value::Int(2))),
+            ],
+        ));
+        for (src, expr, span) in [("1 b 2", infix, 2..3), ("b(1, 2).", prefix, 0..1)] {
             let body = spanned(case(
                 var("a", 5..6),
                 Spanned::new(
@@ -515,17 +514,14 @@ mod tests {
             var("🦀", 2..6),
             spanned(Expr::Lit(Value::Int(2))),
         ));
-        let prefix = call(
-            call(
-                var("🦀", 0..4),
-                vec![
-                    spanned(Expr::Lit(Value::Int(1))),
-                    spanned(Expr::Lit(Value::Int(2))),
-                ],
-            ),
-            vec![],
-        );
-        for (src, expr, span) in [("1 🦀 2", infix, 2..6), ("🦀(1, 2)()", prefix, 0..4)] {
+        let prefix = evaluate(call(
+            var("🦀", 0..4),
+            vec![
+                spanned(Expr::Lit(Value::Int(1))),
+                spanned(Expr::Lit(Value::Int(2))),
+            ],
+        ));
+        for (src, expr, span) in [("1 🦀 2", infix, 2..6), ("🦀(1, 2).", prefix, 0..4)] {
             // The internal operator's 2..5 span would split the caller's emoji.
             assert_call_error(
                 src,
@@ -580,13 +576,7 @@ mod tests {
                 }),
                 span,
             );
-            let force = Spanned::new(
-                Expr::Call(Call {
-                    callee: Box::new(apply),
-                    args: Spanned::new(vec![], span),
-                }),
-                span,
-            );
+            let force = Spanned::new(Expr::Eval(Box::new(apply)), span);
             Spanned::new(binding("combine", function, force), span)
         }
         let mut original = body((50..60).into());
@@ -629,11 +619,11 @@ mod tests {
     fn test_returned_eel_builtin_function_keeps_original_call_site() {
         let expr = spanned(binding(
             "f",
-            call(call(var("b", 8..9), vec![]), vec![]),
-            call(
-                call(var("f", 14..15), vec![spanned(Expr::Lit(Value::Int(0)))]),
-                vec![],
-            ),
+            evaluate(call(var("b", 8..9), vec![])),
+            evaluate(call(
+                var("f", 13..14),
+                vec![spanned(Expr::Lit(Value::Int(0)))],
+            )),
         ));
         let body = spanned(function(
             Spanned::new(vec!["x"], 2..5),
@@ -646,7 +636,7 @@ mod tests {
             ),
         ));
         assert_call_error(
-            "let f = b()() f(0)()",
+            "let f = b(). f(0).",
             expr,
             eel_builtin("b", vec![], body),
             (8..9).into(),
@@ -658,26 +648,20 @@ mod tests {
     fn test_eel_builtin_calls_do_not_reuse_previous_call_spans() {
         let expr = spanned(binding(
             "_",
-            call(
-                call(
-                    var("b", 8..9),
-                    vec![
-                        spanned(Expr::Lit(Value::Int(0))),
-                        spanned(Expr::Lit(Value::Int(2))),
-                    ],
-                ),
-                vec![],
-            ),
-            call(
-                call(
-                    var("b", 18..19),
-                    vec![
-                        spanned(Expr::Lit(Value::Int(1))),
-                        spanned(Expr::Lit(Value::Int(2))),
-                    ],
-                ),
-                vec![],
-            ),
+            evaluate(call(
+                var("b", 8..9),
+                vec![
+                    spanned(Expr::Lit(Value::Int(0))),
+                    spanned(Expr::Lit(Value::Int(2))),
+                ],
+            )),
+            evaluate(call(
+                var("b", 17..18),
+                vec![
+                    spanned(Expr::Lit(Value::Int(1))),
+                    spanned(Expr::Lit(Value::Int(2))),
+                ],
+            )),
         ));
         let body = spanned(case(
             var("a", 5..6),
@@ -696,10 +680,10 @@ mod tests {
             ),
         ));
         assert_call_error(
-            "let _ = b(0, 2)() b(1, 2)()",
+            "let _ = b(0, 2). b(1, 2).",
             expr,
             eel_builtin("b", vec!["a", "b"], body),
-            (18..19).into(),
+            (17..18).into(),
             "Variable `missing_internal` not found",
         );
     }
@@ -829,7 +813,7 @@ mod tests {
         let deferred = spanned(binding(
             "sum",
             call(var("+", 5..6), vec![max.clone(), one.clone()]),
-            call(spanned(Expr::Var("sum")), vec![]),
+            evaluate(spanned(Expr::Var("sum"))),
         ));
         let variables = spanned(binding(
             "x",
@@ -860,7 +844,7 @@ mod tests {
                 ),
                 10..25,
             ),
-            call(call(spanned(Expr::Var("f")), vec![max]), vec![]),
+            evaluate(call(spanned(Expr::Var("f")), vec![max])),
         ));
         let nested = spanned(op(
             spanned(Expr::Lit(Value::Int(0))),

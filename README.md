@@ -40,7 +40,7 @@ For examples:
 
 ## Features
 
-- **Explicit Evaluation**: Functions can be evaluated to structs, and structs can be evaluated to values.
+- **Explicit Evaluation**: Apply a function with parentheses to create a struct, then evaluate the struct with `.`. For a zero-argument function, use `f()` to create the struct and `f().` to evaluate it.
 - **Functional**: Supports first-class functions and higher-order functions without mutable bindings. Evaluation builds I/O actions as values without running them.
 - **Dynamically Typed**: Types are checked at runtime, allowing for flexibility in function definitions and calls.
 
@@ -103,7 +103,7 @@ Io((fn(n) { pure(n + 1). })(5). bind print)
 // Prints 6 and returns unit.
 ```
 
-The dot only evaluates an applied function. `pure(x).` builds a plan that
+The dot only evaluates a struct. `pure(x).` builds a plan that
 returns `x` without I/O. `print(x).` and `eprint(x).` build plans that write `x`
 to standard output and standard error, respectively, and return `unit`.
 Eel evaluates function arguments as usual when building plans.

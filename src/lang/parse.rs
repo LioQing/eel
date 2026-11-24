@@ -75,7 +75,7 @@ pub fn expr_and_item_parsers<
         .map_with(|expr, e| Spanned::new(expr, e.span()))
         .or(choice((block, paren)));
 
-    let call = atom
+    let postfix = atom
         .clone()
         .foldl_with(
             op.clone()
@@ -84,20 +84,21 @@ pub fn expr_and_item_parsers<
                 .allow_trailing()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-                .or(just(Token::Dot).map(|_| vec![]))
-                .map_with(|args, e| Spanned::new(args, e.span()))
+                .map_with(|args, e| Some(Spanned::new(args, e.span())))
+                .or(just(Token::Dot).to(None))
                 .repeated(),
-            |callee, args, e| {
-                Spanned::new(
-                    SyntaxExpr::Call(Call {
-                        callee: Box::new(callee),
+            |operand, args, e| {
+                let expr = match args {
+                    Some(args) => SyntaxExpr::Call(Call {
+                        callee: Box::new(operand),
                         args,
                     }),
-                    e.span(),
-                )
+                    None => SyntaxExpr::Eval(Box::new(operand)),
+                };
+                Spanned::new(expr, e.span())
             },
         )
-        .labelled("call expression");
+        .labelled("postfix expression");
 
     let fn_parts = just(Token::Fn)
         .ignore_then(
@@ -172,7 +173,7 @@ pub fn expr_and_item_parsers<
         })
         .labelled("case expression");
 
-    inline.define(choice((call, r#fn, case)));
+    inline.define(choice((postfix, r#fn, case)));
 
     op.define(
         inline
@@ -322,6 +323,10 @@ mod tests {
             callee: Box::new(callee),
             args: spanned(args),
         }))
+    }
+
+    fn evaluate(operand: Spanned<SyntaxExpr<'_>>) -> Spanned<SyntaxExpr<'_>> {
+        spanned(SyntaxExpr::Eval(Box::new(operand)))
     }
 
     fn function<'src>(
@@ -492,8 +497,8 @@ mod tests {
     }
 
     #[test]
-    fn test_call_no_args_dot() {
-        assert_parse!("bar.", call(var("bar"), vec![]));
+    fn test_eval() {
+        assert_parse!("bar.", evaluate(var("bar")));
     }
 
     #[test]
@@ -521,10 +526,10 @@ mod tests {
     }
 
     #[test]
-    fn test_call_chained_call_with_dot() {
+    fn test_call_and_eval_chain() {
         assert_parse!(
-            "foo(bar).",
-            call(call(var("foo"), vec![var("bar")]), vec![]),
+            "foo(bar).().",
+            evaluate(call(evaluate(call(var("foo"), vec![var("bar")])), vec![])),
         );
     }
 
@@ -678,13 +683,13 @@ mod tests {
     }
 
     #[test]
-    fn test_calls_bind_more_tightly_than_operators() {
+    fn test_postfix_expressions_bind_more_tightly_than_operators() {
         let (two, three, four) = (
             atom(Expr::Lit(Value::Int(2))),
             atom(Expr::Lit(Value::Int(3))),
             atom(Expr::Lit(Value::Int(4))),
         );
-        let call_id = |arg| call(call(var("id"), vec![arg]), vec![]);
+        let call_id = |arg| evaluate(call(var("id"), vec![arg]));
         assert_parse!(
             "2 * id(3). + id(4).",
             ops(

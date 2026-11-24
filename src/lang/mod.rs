@@ -1,8 +1,6 @@
-//! Lexing, parsing, fixity resolution, and evaluation.
-
-pub(super) mod builtin;
-pub(super) mod declare;
-pub(super) mod fixity;
-pub(super) mod interp;
-pub(super) mod lex;
-pub(super) mod parse;
+pub mod builtin;
+pub mod declare;
+pub mod fixity;
+pub mod interp;
+pub mod lex;
+pub mod parse;

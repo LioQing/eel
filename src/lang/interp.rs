@@ -166,29 +166,20 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 expr.span,
                 callee.span,
             )?),
-            Value::Struct(Struct {
-                name,
-                body,
-                applied_env,
-                ..
-            }) => {
-                if !args.value.is_empty() {
-                    return Err(Error {
-                        msg: format!(
-                            "Expected no argument for struct {}, but got {}",
-                            name.map(|n| format!("`{n}`"))
-                                .unwrap_or_else(|| "<anonymous>".to_string()),
-                            args.value.len()
-                        ),
-                        span: expr.span,
-                    });
-                }
-
-                eval(&body, applied_env)?
-            }
-            f => {
+            v => {
                 return Err(Error {
-                    msg: format!("Expected a function or struct, but got {f}"),
+                    msg: format!("Expected a function, but got {v}"),
+                    span: expr.span,
+                });
+            }
+        },
+        Expr::Eval(operand) => match eval(operand, env)? {
+            Value::Struct(Struct {
+                body, applied_env, ..
+            }) => eval(&body, applied_env)?,
+            v => {
+                return Err(Error {
+                    msg: format!("Expected a struct, but got {v}"),
                     span: expr.span,
                 });
             }
@@ -340,6 +331,10 @@ mod tests {
         }))
     }
 
+    fn evaluate(operand: Spanned<Expr<'_>>) -> Spanned<Expr<'_>> {
+        spanned(Expr::Eval(Box::new(operand)))
+    }
+
     fn binding<'src>(
         name: &'src str,
         assign: Spanned<Expr<'src>>,
@@ -439,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn test_call() {
+    fn test_call_then_eval() {
         let env = env_from([
             ("x", Value::Int(42)),
             ("y", Value::Float(3.14)),
@@ -460,8 +455,8 @@ mod tests {
             ),
         ]);
 
-        // id(x)()
-        let expr = call(call(var("id"), vec![var("x")]), vec![]);
+        // id(x).
+        let expr = evaluate(call(var("id"), vec![var("x")]));
 
         assert_eval(expr, env, Value::Int(42));
     }
@@ -517,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn test_call_struct() {
+    fn test_eval_struct() {
         let x_arg = Rc::new(Value::Int(43));
         let applied_env = env_from([("y", Value::Float(3.14))]).insert("x", Rc::clone(&x_arg));
         let env = env_from([
@@ -537,8 +532,8 @@ mod tests {
             ),
         ]);
 
-        // x_struct()
-        let expr = call(var("x_struct"), vec![]);
+        // x_struct.
+        let expr = evaluate(var("x_struct"));
 
         assert_eval(expr, env, Value::Int(43));
     }
@@ -614,7 +609,7 @@ mod tests {
         assert!(Rc::ptr_eq(&args[0].value, applied_env.get("x").unwrap()));
 
         let env = env_from([("value", value.clone())]);
-        let force = call(var("value"), vec![]);
+        let force = evaluate(var("value"));
         for _ in 0..2 {
             let Value::Closure(closure) = eval(&force, env.clone()).unwrap() else {
                 panic!("expected a closure");
@@ -728,8 +723,8 @@ mod tests {
             ],
         );
 
-        // +(x, y)()
-        let expr = call(call(var("+"), vec![var("x"), var("y")]), vec![]);
+        // +(x, y).
+        let expr = evaluate(call(var("+"), vec![var("x"), var("y")]));
 
         assert_eval(expr, env, Value::Int(45));
     }
@@ -742,8 +737,8 @@ mod tests {
             make,
             binding(
                 "f",
-                call(call(var("make"), vec![int(42)]), vec![]),
-                call(call(var("f"), vec![]), vec![]),
+                evaluate(call(var("make"), vec![int(42)])),
+                evaluate(call(var("f"), vec![])),
             ),
         );
         assert_eval(expr, Env::new(), Value::Int(42));
@@ -757,7 +752,7 @@ mod tests {
             binding(
                 "f",
                 binding("x", int(42), function(vec![], var("x"))),
-                binding("padding", int(99), call(call(var("f"), vec![]), vec![])),
+                binding("padding", int(99), evaluate(call(var("f"), vec![]))),
             ),
         );
         assert_eval(expr, Env::new(), Value::Int(42));
@@ -771,14 +766,14 @@ mod tests {
             make,
             binding(
                 "first",
-                call(call(var("make"), vec![int(20)]), vec![]),
+                evaluate(call(var("make"), vec![int(20)])),
                 binding(
                     "second",
-                    call(call(var("make"), vec![int(22)]), vec![]),
+                    evaluate(call(var("make"), vec![int(22)])),
                     op(
-                        call(call(var("first"), vec![]), vec![]),
+                        evaluate(call(var("first"), vec![])),
                         "+",
-                        call(call(var("second"), vec![]), vec![]),
+                        evaluate(call(var("second"), vec![])),
                     ),
                 ),
             ),
@@ -797,8 +792,8 @@ mod tests {
             make,
             binding(
                 "value",
-                call(call(var("make"), vec![int(42)]), vec![]),
-                call(var("value"), vec![]),
+                evaluate(call(var("make"), vec![int(42)])),
+                evaluate(var("value")),
             ),
         );
         assert_eval(expr, Env::new(), Value::Int(42));
@@ -817,7 +812,7 @@ mod tests {
             binding(
                 "value",
                 value,
-                binding("padding", int(99), call(var("value"), vec![])),
+                binding("padding", int(99), evaluate(var("value"))),
             ),
         );
         assert_eval(expr, Env::new(), Value::Int(42));
@@ -837,7 +832,7 @@ mod tests {
             }),
             member: 0,
         });
-        let expr = call(call(var("f"), vec![]), vec![]);
+        let expr = evaluate(call(var("f"), vec![]));
         assert_eval(
             expr,
             env_from([("f", closure), ("x", Value::Int(99))]),
@@ -861,8 +856,8 @@ mod tests {
         });
         let expr = binding(
             "f",
-            call(call(var("make"), vec![int(42)]), vec![]),
-            call(call(var("f"), vec![]), vec![]),
+            evaluate(call(var("make"), vec![int(42)])),
+            evaluate(call(var("f"), vec![])),
         );
         assert_eval(expr, env_from([("make", closure)]), Value::Int(42));
     }
@@ -896,7 +891,7 @@ mod tests {
                     function(vec![], var("x")),
                 )],
             ),
-            call(call(var("f"), vec![]), vec![]),
+            evaluate(call(var("f"), vec![])),
         );
         assert_eval(expr, Env::new(), Value::Int(42));
     }
@@ -913,7 +908,7 @@ mod tests {
                         op(
                             var("n"),
                             "*",
-                            call(call(var("fact"), vec![op(var("n"), "-", int(1))]), vec![]),
+                            evaluate(call(var("fact"), vec![op(var("n"), "-", int(1))])),
                         ),
                     ),
                 ],
@@ -934,7 +929,7 @@ mod tests {
                         op(
                             var("n"),
                             "+",
-                            call(call(var("sum"), vec![op(var("n"), "-", int(1))]), vec![]),
+                            evaluate(call(var("sum"), vec![op(var("n"), "-", int(1))])),
                         ),
                     ),
                 ],
@@ -946,8 +941,8 @@ mod tests {
             make,
             binding(
                 "sum",
-                call(call(var("make"), vec![int(27)]), vec![]),
-                call(call(var("sum"), vec![int(5)]), vec![]),
+                evaluate(call(var("make"), vec![int(27)])),
+                evaluate(call(var("sum"), vec![int(5)])),
             ),
         );
         assert_eval(expr, builtin::env(), Value::Int(42));
@@ -964,7 +959,7 @@ mod tests {
                 binding(
                     "fact",
                     function(vec!["n"], int(0)),
-                    call(call(var("alias"), vec![int(5)]), vec![]),
+                    evaluate(call(var("alias"), vec![int(5)])),
                 ),
             ),
         );
@@ -976,7 +971,7 @@ mod tests {
         let expr = binding(
             "value",
             binding("fact", factorial(), call(var("fact"), vec![int(5)])),
-            call(var("value"), vec![]),
+            evaluate(var("value")),
         );
         assert_eval(expr, builtin::env(), Value::Int(120));
     }
@@ -988,7 +983,7 @@ mod tests {
                 name: spanned("first"),
                 fixity: None,
                 params: spanned(vec![]),
-                body: Rc::new(call(call(var("second"), vec![]), vec![])),
+                body: Rc::new(evaluate(call(var("second"), vec![]))),
             },
             RecFn {
                 name: spanned("second"),
@@ -1014,7 +1009,7 @@ mod tests {
         let deferred = eval(&call(var("first"), vec![]), env).unwrap();
         assert!(group.upgrade().is_some());
         assert_eval(
-            call(var("deferred"), vec![]),
+            evaluate(var("deferred")),
             env_from([("deferred", deferred)]),
             Value::Int(42),
         );
@@ -1026,7 +1021,7 @@ mod tests {
         let expr = binding(
             "f",
             function(vec!["f"], var("f")),
-            call(call(var("f"), vec![int(42)]), vec![]),
+            evaluate(call(var("f"), vec![int(42)])),
         );
         assert_eval(expr, Env::new(), Value::Int(42));
     }
@@ -1039,7 +1034,7 @@ mod tests {
             binding(
                 "x",
                 int(42),
-                call(call(var("add"), vec![var("x"), int(0)]), vec![]),
+                evaluate(call(var("add"), vec![var("x"), int(0)])),
             ),
         );
         assert_eval(expr, builtin::env(), Value::Int(42));
@@ -1059,7 +1054,7 @@ mod tests {
             }),
             member: 0,
         });
-        let expr = call(call(var("f"), vec![]), vec![]);
+        let expr = evaluate(call(var("f"), vec![]));
         assert_eq!(
             eval(&expr, env_from([("f", closure), ("x", Value::Int(42))])),
             Err(Error {

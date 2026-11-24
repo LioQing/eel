@@ -123,6 +123,7 @@ pub fn resolve<'src>(
             callee: Box::new(resolve(*callee, specs)),
             args: args.map(|args| args.into_iter().map(|arg| resolve(arg, specs)).collect()),
         }),
+        SyntaxExpr::Eval(operand) => Expr::Eval(Box::new(resolve(*operand, specs))),
         SyntaxExpr::Fn(FnExpr { params, body }) => {
             let body = resolve_fn_body(&params.value, *body, specs);
             Expr::Fn(FnExpr { params, body })
@@ -825,8 +826,10 @@ mod tests {
 
     #[test]
     fn test_calls_contain_independent_operator_chains() {
-        let syntax_id = |arg| syntax_call(syntax_call(syntax_var("id"), vec![arg]), vec![]);
-        let id = |arg| call(call(var("id"), vec![arg]), vec![]);
+        let syntax_eval = |operand| spanned(SyntaxExpr::Eval(Box::new(operand)));
+        let evaluate = |operand| spanned(Expr::Eval(Box::new(operand)));
+        let syntax_id = |arg| syntax_eval(syntax_call(syntax_var("id"), vec![arg]));
+        let id = |arg| evaluate(call(var("id"), vec![arg]));
         assert_resolve(
             syntax_ops(
                 syntax_int(2),
@@ -842,20 +845,14 @@ mod tests {
             id(op(op(int(2), "*", int(3)), "+", int(4))),
         );
         assert_resolve(
-            syntax_call(
-                syntax_call(
-                    syntax_var("!="),
-                    vec![syntax_int_ops(2, &[("*", 3), ("+", 4)]), syntax_int(10)],
-                ),
-                vec![],
-            ),
-            call(
-                call(
-                    var("!="),
-                    vec![op(op(int(2), "*", int(3)), "+", int(4)), int(10)],
-                ),
-                vec![],
-            ),
+            syntax_eval(syntax_call(
+                syntax_var("!="),
+                vec![syntax_int_ops(2, &[("*", 3), ("+", 4)]), syntax_int(10)],
+            )),
+            evaluate(call(
+                var("!="),
+                vec![op(op(int(2), "*", int(3)), "+", int(4)), int(10)],
+            )),
         );
     }
 
@@ -974,8 +971,11 @@ mod tests {
     fn test_function_fixity_is_lexical_not_call_site_dependent() {
         let left = declared(OpAssoc::Left, 1);
         let right = declared(OpAssoc::Right, 1);
-        let syntax_f = syntax_call(syntax_call(syntax_var("f"), vec![]), vec![]);
-        let f = call(call(var("f"), vec![]), vec![]);
+        let syntax_f = spanned(SyntaxExpr::Eval(Box::new(syntax_call(
+            syntax_var("f"),
+            vec![],
+        ))));
+        let f = spanned(Expr::Eval(Box::new(call(var("f"), vec![]))));
         assert_resolve(
             syntax_binding(
                 left,

@@ -17,11 +17,7 @@ fn test_builtin_infix_and_prefix_application_syntax() {
         ("unit", "!=", "unit", 0),
         ("1", "==", "1", 1),
     ] {
-        for src in [
-            format!("{a} {op} {b}"),
-            format!("{op}({a}, {b})."),
-            format!("{op}({a}, {b})()"),
-        ] {
+        for src in [format!("{a} {op} {b}"), format!("{op}({a}, {b}).")] {
             assert_returned(&src, expected);
         }
     }
@@ -30,11 +26,7 @@ fn test_builtin_infix_and_prefix_application_syntax() {
 #[test]
 fn test_comparison_type_errors_in_infix_and_prefix_calls() {
     for op in ["!=", "=="] {
-        for src in [
-            format!("1 {op} 1.0"),
-            format!("{op}(1, 1.0)."),
-            format!("{op}(1, 1.0)()"),
-        ] {
+        for src in [format!("1 {op} 1.0"), format!("{op}(1, 1.0).")] {
             let file = SourceFile::new(src);
             let output = file.run();
             assert_failure(&output, "Cannot compare");

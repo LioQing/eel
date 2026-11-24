@@ -336,6 +336,7 @@ mod parse {
     pub enum SyntaxExpr<'src> {
         Atom(Expr<'src>),
         Call(Call<Self>),
+        Eval(Box<Spanned<Self>>),
         Fn(FnExpr<'src, Box<Spanned<Self>>>),
         Case(Case<'src, Self>),
         Ops(Ops<'src>),
@@ -357,6 +358,7 @@ mod parse {
                         .collect::<Vec<_>>()
                         .join(", "),
                 ),
+                SyntaxExpr::Eval(operand) => write!(f, "{}.", operand.value),
                 SyntaxExpr::Fn(FnExpr { params, body }) => {
                     write!(
                         f,
@@ -414,6 +416,7 @@ mod parse {
             match (self, other) {
                 (SyntaxExpr::Atom(l), SyntaxExpr::Atom(r)) => l.spanless_eq(r),
                 (SyntaxExpr::Call(l), SyntaxExpr::Call(r)) => l.spanless_eq(r),
+                (SyntaxExpr::Eval(l), SyntaxExpr::Eval(r)) => l.spanless_eq(r),
                 (SyntaxExpr::Fn(l), SyntaxExpr::Fn(r)) => l.spanless_eq(r),
                 (SyntaxExpr::Case(l), SyntaxExpr::Case(r)) => l.spanless_eq(r),
                 (SyntaxExpr::Ops(l), SyntaxExpr::Ops(r)) => l.spanless_eq(r),
@@ -628,6 +631,7 @@ mod fixity {
         Lit(Value<'src>),
         Var(&'src str),
         Call(Call<Self>),
+        Eval(Box<Spanned<Self>>),
         Fn(FnExpr<'src, Rc<Spanned<Self>>>),
         Case(Case<'src, Self>),
         Op(Op<'src>),
@@ -652,6 +656,7 @@ mod fixity {
                         .collect::<Vec<_>>()
                         .join(", "),
                 ),
+                Expr::Eval(operand) => write!(f, "{}.", operand.value),
                 Expr::Fn(FnExpr { params, body }) => {
                     write!(
                         f,
@@ -718,6 +723,7 @@ mod fixity {
                 (Expr::Lit(l), Expr::Lit(r)) => l.spanless_eq(r),
                 (Expr::Var(l), Expr::Var(r)) => l == r,
                 (Expr::Call(l), Expr::Call(r)) => l.spanless_eq(r),
+                (Expr::Eval(l), Expr::Eval(r)) => l.spanless_eq(r),
                 (Expr::Fn(l), Expr::Fn(r)) => l.spanless_eq(r),
                 (Expr::Case(l), Expr::Case(r)) => l.spanless_eq(r),
                 (Expr::Op(l), Expr::Op(r)) => l.spanless_eq(r),

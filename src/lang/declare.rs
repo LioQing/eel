@@ -126,7 +126,7 @@ mod lex {
 mod parse {
     use super::*;
 
-    pub(super) fn fmt_fixity(f: &mut fmt::Formatter<'_>, fixity: Option<Fixity>) -> fmt::Result {
+    fn fmt_fixity(f: &mut fmt::Formatter<'_>, fixity: Option<Fixity>) -> fmt::Result {
         match fixity {
             Some(Fixity {
                 assoc: OpAssoc::Left,
@@ -138,17 +138,6 @@ mod parse {
             }) => write!(f, " opr {precedence}"),
             None => Ok(()),
         }
-    }
-
-    pub(super) fn fmt_let(
-        f: &mut fmt::Formatter<'_>,
-        fixity: Option<Fixity>,
-        name: &str,
-        init: &impl fmt::Display,
-    ) -> fmt::Result {
-        write!(f, "let")?;
-        fmt_fixity(f, fixity)?;
-        write!(f, " {name} = {init}")
     }
 
     fn fmt_let_rec<'src>(
@@ -314,7 +303,9 @@ mod parse {
             match self {
                 Self::Expr(expr) => write!(f, "{}", expr.value),
                 Self::Let(LetBinding { fixity, name, init }) => {
-                    fmt_let(f, *fixity, name, &init.value)
+                    write!(f, "let")?;
+                    fmt_fixity(f, *fixity)?;
+                    write!(f, " {name} = {}", init.value)
                 }
                 Self::LetRec(bindings) => fmt_let_rec(f, bindings),
             }
@@ -400,8 +391,9 @@ mod parse {
                     init,
                     body,
                 }) => {
-                    fmt_let(f, *fixity, name, &init.value)?;
-                    write!(f, " {}", body.value)
+                    write!(f, "let")?;
+                    fmt_fixity(f, *fixity)?;
+                    write!(f, " {name} = {} {}", init.value, body.value)
                 }
                 SyntaxExpr::LetRec(LetRec { bindings, body }) => {
                     fmt_let_rec(f, bindings)?;
@@ -457,8 +449,21 @@ mod parse {
 }
 
 mod fixity {
-    use super::parse::{fmt_fixity, fmt_let};
     use super::*;
+
+    fn fmt_fixity(f: &mut fmt::Formatter<'_>, fixity: Option<Fixity>) -> fmt::Result {
+        match fixity {
+            Some(Fixity {
+                assoc: OpAssoc::Left,
+                precedence,
+            }) => write!(f, " opl {precedence}"),
+            Some(Fixity {
+                assoc: OpAssoc::Right,
+                precedence,
+            }) => write!(f, " opr {precedence}"),
+            None => Ok(()),
+        }
+    }
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct Closure<'src> {
@@ -694,8 +699,9 @@ mod fixity {
                     init,
                     body,
                 }) => {
-                    fmt_let(f, *fixity, name, &init.value)?;
-                    write!(f, " {}", body.value)
+                    write!(f, "let")?;
+                    fmt_fixity(f, *fixity)?;
+                    write!(f, " {name} = {} {}", init.value, body.value)
                 }
                 Expr::LetRec(LetRec { bindings, body }) => {
                     write!(f, "let {{")?;

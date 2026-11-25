@@ -42,7 +42,11 @@ pub fn run_result<'src>(
             }));
         };
 
-        let value = match (plan.name, plan.args.as_ref()) {
+        let action_name = match plan.ctor {
+            DefinitionId::Builtin(name) => Some(name),
+            DefinitionId::Source(_) => plan.name,
+        };
+        let value = match (action_name, plan.args.as_ref()) {
             (Some("Pure"), [arg]) => Rc::clone(&arg.value),
             (Some("Print"), [arg]) => {
                 writeln!(output, "{}", arg.value).map_err(ActionError::Output)?;

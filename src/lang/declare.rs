@@ -484,8 +484,15 @@ mod fixity {
         pub members: Box<[ClosureDef<'src>]>,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DefinitionId<'src> {
+        Source(Span),
+        Builtin(&'src str),
+    }
+
     #[derive(Debug, PartialEq)]
     pub struct ClosureDef<'src> {
+        pub id: DefinitionId<'src>,
         pub rec_name: Option<&'src str>,
         pub params: Vec<&'src str>,
         pub body: Rc<Spanned<Expr<'src>>>,
@@ -493,6 +500,7 @@ mod fixity {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct Struct<'src> {
+        pub ctor: DefinitionId<'src>,
         pub name: Option<&'src str>,
         pub body: Rc<Spanned<Expr<'src>>>,
         pub args: StructArgs<'src>,
@@ -519,6 +527,7 @@ mod fixity {
                         rec_name,
                         params,
                         body,
+                        ..
                     } = closure.definition();
                     write!(
                         f,

@@ -11,6 +11,7 @@ macro_rules! builtin {
                 group: Rc::new(ClosureGroup {
                     env: Default::default(),
                     members: Box::new([ClosureDef {
+                        id: DefinitionId::Builtin($name),
                         rec_name: None,
                         params: vec![$(stringify!($param)),*],
                         body: Rc::new(Spanned::new(Expr::Builtin(|expr, env| {
@@ -19,6 +20,7 @@ macro_rules! builtin {
                             #[allow(unused_variables)]
                             let $env = env;
                             $(
+                                #[allow(unused_variables)]
                                 let $param = env.get(stringify!($param))
                                     .map(Rc::as_ref)
                                     .ok_or_else(|| Error {
@@ -55,6 +57,7 @@ macro_rules! builtin {
                 group: Rc::new(ClosureGroup {
                     env: Default::default(),
                     members: Box::new([ClosureDef {
+                        id: DefinitionId::Builtin($name),
                         rec_name: None,
                         params: vec![$(stringify!($param)),*],
                         body: Rc::new(Spanned::new(ast.value, 0..0)),
@@ -140,6 +143,7 @@ pub fn env<'src>() -> Env<'src> {
             .map(|arg| (arg.name, Rc::clone(&arg.value)))
             .collect();
         Value::Struct(Struct {
+            ctor: DefinitionId::Builtin(name),
             name: Some(name),
             body: Rc::new(Spanned::new(Expr::Lit(Value::Unit), body_span)),
             args,
@@ -149,6 +153,11 @@ pub fn env<'src>() -> Env<'src> {
 
     [
         builtin!("Io" expr env [plan] => Ok(plan.clone())),
+        // These are also the constructors of plans returned by the lowercase helpers.
+        builtin!("Pure" expr env [value] => Ok(Value::Unit)),
+        builtin!("Print" expr env [value] => Ok(Value::Unit)),
+        builtin!("Eprint" expr env [value] => Ok(Value::Unit)),
+        builtin!("Bind" expr env [plan, next] => Ok(Value::Unit)),
         builtin!("pure" expr env [value] => Ok(action("Pure", expr.span, Rc::from([
             Binding { name: "value", value: Rc::new(value.clone()) },
         ])))),
@@ -398,6 +407,7 @@ mod tests {
                 group: Rc::new(ClosureGroup {
                     env: Default::default(),
                     members: Box::new([ClosureDef {
+                        id: DefinitionId::Builtin(name),
                         rec_name: None,
                         params,
                         body: Rc::new(Spanned::new(body.value, 0..0)),
@@ -462,6 +472,7 @@ mod tests {
                 group: Rc::new(ClosureGroup {
                     env: Default::default(),
                     members: Box::new([ClosureDef {
+                        id: DefinitionId::Builtin("b"),
                         rec_name: None,
                         params: vec!["a", "b"],
                         body: Rc::new(expected),
@@ -938,6 +949,7 @@ mod tests {
             group: Rc::new(ClosureGroup {
                 env: Default::default(),
                 members: Box::new([ClosureDef {
+                    id: DefinitionId::Source((0..0).into()),
                     rec_name: None,
                     params: vec!["x"],
                     body: Rc::new(spanned(Expr::Var("x"))),
@@ -960,6 +972,7 @@ mod tests {
             .map(|arg| (arg.name, Rc::clone(&arg.value)))
             .collect();
         let deferred = Value::Struct(Struct {
+            ctor: DefinitionId::Builtin("+"),
             name: Some("+"),
             body: Rc::new(spanned(Expr::Lit(Value::Int(3)))),
             args,

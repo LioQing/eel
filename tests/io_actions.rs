@@ -57,6 +57,13 @@ fn test_only_a_direct_io_result_runs_once() {
 }
 
 #[test]
+fn test_builtin_action_aliases_keep_their_original_behavior() {
+    let output =
+        SourceFile::new("let P = Print let Print = Pure Io(Bind(P(6), fn(_) { Print(42) }))").run();
+    assert_exit(&output, 42, "6\n", "");
+}
+
+#[test]
 fn test_runner_uses_names_and_positional_args_not_bodies() {
     let output =
         SourceFile::new("let Io = fn(x) { missing } let Print = fn(x) { missing } Io(Print(6))")

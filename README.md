@@ -36,8 +36,10 @@ to exit. The REPL also accepts piped input without printing prompts.
 ## Structs and pattern matching
 
 Eel evaluates the arguments when you apply a function, then stores their
-values in the struct. A `case` arm can match the struct by name and unpack
-those arguments without evaluating the body. That's how the same `fn`
+values in the struct. A `case` pattern like `cons(x, xs)` looks up `cons` in
+the scope of the `case` and matches structs made by that function definition.
+An alias matches too, but a new definition with the same name does not.
+The pattern unpacks the arguments without evaluating the body. That's how the same `fn`
 declaration can work as a function or as a data constructor.
 
 ```text
@@ -93,8 +95,10 @@ evaluates the unary function `next` with the result. `next` must return
 a plan without an `Io` wrapper. `bind` groups to the left by default, so
 you can chain several actions.
 
-The runner recognizes `Pure`, `Print`, `Eprint`, and `Bind` by struct name
-and positional arguments. It reports malformed plans when it reaches them.
+The runner recognizes the built-in plan constructors `Pure`, `Print`, `Eprint`,
+and `Bind`, even through aliases. It also accepts user-defined structs with
+those names and reads their arguments by position. It reports malformed plans
+when it reaches them.
 
 The runner leaves `Io` structs inside other values or in standalone REPL
 bindings alone. When a plan runs, its result becomes the file's exit code

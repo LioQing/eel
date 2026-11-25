@@ -344,6 +344,35 @@ mod tests {
     }
 
     #[test]
+    fn case_matches_the_captured_constructor_across_redefinitions() {
+        let arena = Arena::new();
+        let mut session = Session::new(&arena);
+        let definition = "let F = fn(x) { x }";
+        submit(&mut session, definition).unwrap();
+        submit(&mut session, "let alias = F").unwrap();
+        submit(
+            &mut session,
+            "let G = fn(x) { case x { F(y) => y _ => 0 } }",
+        )
+        .unwrap();
+        submit(&mut session, definition).unwrap();
+        assert_result(&mut session, "G(F(42)).", 0);
+        assert_result(&mut session, "G(alias(42)).", 42);
+    }
+
+    #[test]
+    fn identical_redefinitions_keep_distinct_source_locations() {
+        let (output, diagnostics) = run_with_input(
+            "let F = fn() { missing }\nlet old = F\nlet F = fn() { missing }\nold().\nF().\n",
+            false,
+        );
+        assert!(output.is_empty(), "{output}");
+        for source in ["<repl:1>:1:16", "<repl:3>:1:16"] {
+            assert!(diagnostics.contains(source), "{diagnostics}");
+        }
+    }
+
+    #[test]
     fn test_session_keeps_lexical_bindings_and_source_locations() {
         let arena = Arena::new();
         let mut session = Session::new(&arena);

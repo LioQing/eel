@@ -29,7 +29,7 @@ fn test_escaped_group_member_keeps_original_peers_and_struct_names() {
          let peer = fn(n) { 0 }
          let first = fn(n) { 0 }
          let value = alias(42)
-         case value { alias(42) => { case value. { peer(n) => n } } }",
+         case value { alias(42) => { case value. { peer(n) => 0 original => original. } } }",
         42,
     );
 }

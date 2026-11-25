@@ -82,11 +82,11 @@ and checks types at runtime.
 file or REPL expression wrapped in `Io(...)`:
 
 ```text
-Io(pure(6). bind print)
+Io(let x <- return(6). print(x).)
 // Prints 6 and returns unit.
 ```
 
-`pure(x).` builds a plan that returns `x` without doing I/O. When run, plans
+`return(x).` builds a plan that yields `x` without doing I/O. When run, plans
 from `print(x).` and `eprint(x).` write to standard output and standard
 error, respectively, and return `unit`.
 
@@ -95,7 +95,24 @@ evaluates the unary function `next` with the result. `next` must return
 a plan without an `Io` wrapper. `bind` groups to the left by default, so
 you can chain several actions.
 
-The runner recognizes the built-in plan constructors `Pure`, `Print`, `Eprint`,
+Use `let x <- action` to name the result for the rest of the expression:
+
+```text
+Io(
+    let x <- return(20).
+    let y <- return(x + 2).
+    let _ <- print(y).
+    return(x + y).
+)
+// Prints 22 and returns 42.
+```
+
+`let x <- action rest` means `action bind fn(x) { rest }`, using the `bind`
+in scope. A user-defined `bind` works the same way. As with `let x = ...`,
+parenthesize an infix expression on the right of `<-`. Use `_` when you
+don't need the result.
+
+The runner recognizes the built-in plan constructors `Return`, `Print`, `Eprint`,
 and `Bind`, even through aliases. It also accepts user-defined structs with
 those names and reads their arguments by position. It reports malformed plans
 when it reaches them.

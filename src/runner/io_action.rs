@@ -47,7 +47,7 @@ pub fn run_result<'src>(
             DefinitionId::Source(_) => plan.name,
         };
         let value = match (action_name, plan.args.as_ref()) {
-            (Some("Pure"), [arg]) => Rc::clone(&arg.value),
+            (Some("Return"), [arg]) => Rc::clone(&arg.value),
             (Some("Print"), [arg]) => {
                 writeln!(output, "{}", arg.value).map_err(ActionError::Output)?;
                 Rc::new(Value::Unit)
@@ -71,7 +71,7 @@ pub fn run_result<'src>(
                 current = Rc::clone(&first.value);
                 continue;
             }
-            (Some(name @ ("Pure" | "Print" | "Eprint" | "Bind")), _) => {
+            (Some(name @ ("Return" | "Print" | "Eprint" | "Bind")), _) => {
                 return Err(ActionError::Runtime(Error {
                     msg: format!("Wrong number of arguments for IO action `{name}`"),
                     span,
@@ -79,7 +79,7 @@ pub fn run_result<'src>(
             }
             _ => {
                 return Err(ActionError::Runtime(Error {
-                    msg: "Expected an IO action (`Pure`, `Print`, `Eprint`, or `Bind`)".into(),
+                    msg: "Expected an IO action (`Return`, `Print`, `Eprint`, or `Bind`)".into(),
                     span,
                 }));
             }

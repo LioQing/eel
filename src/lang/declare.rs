@@ -88,6 +88,7 @@ mod lex {
         Opl,
         Opr,
         PattArm,
+        BindArrow,
         Assign,
         Ident(&'src str),
     }
@@ -110,6 +111,7 @@ mod lex {
                 Token::Opl => write!(f, "opl"),
                 Token::Opr => write!(f, "opr"),
                 Token::PattArm => write!(f, "=>"),
+                Token::BindArrow => write!(f, "<-"),
                 Token::Assign => write!(f, "="),
                 Token::Ident(ident) => write!(f, "{ident}"),
             }
@@ -324,6 +326,22 @@ mod parse {
     }
 
     #[derive(Debug, Clone, PartialEq)]
+    pub struct LetBind<'src> {
+        pub name: Spanned<&'src str>,
+        pub arrow: Span,
+        pub action: Box<Spanned<SyntaxExpr<'src>>>,
+        pub body: Box<Spanned<SyntaxExpr<'src>>>,
+    }
+
+    impl SpanlessPartialEq for LetBind<'_> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self.name.value == other.name.value
+                && self.action.spanless_eq(&other.action)
+                && self.body.spanless_eq(&other.body)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
     pub enum SyntaxExpr<'src> {
         Atom(Expr<'src>),
         Call(Call<Self>),
@@ -331,6 +349,7 @@ mod parse {
         Fn(FnExpr<'src, Box<Spanned<Self>>>),
         Case(Case<'src, Self>),
         Ops(Ops<'src>),
+        LetBind(LetBind<'src>),
         Let(Let<'src, Self>),
         LetRec(LetRec<'src, Self, Spanned<Self>>),
     }
@@ -385,6 +404,11 @@ mod parse {
                     }
                     write!(f, "({result})")
                 }
+                SyntaxExpr::LetBind(b) => write!(
+                    f,
+                    "let {} <- {} {}",
+                    b.name.value, b.action.value, b.body.value
+                ),
                 SyntaxExpr::Let(Let {
                     fixity,
                     name,
@@ -412,6 +436,7 @@ mod parse {
                 (SyntaxExpr::Fn(l), SyntaxExpr::Fn(r)) => l.spanless_eq(r),
                 (SyntaxExpr::Case(l), SyntaxExpr::Case(r)) => l.spanless_eq(r),
                 (SyntaxExpr::Ops(l), SyntaxExpr::Ops(r)) => l.spanless_eq(r),
+                (SyntaxExpr::LetBind(l), SyntaxExpr::LetBind(r)) => l.spanless_eq(r),
                 (SyntaxExpr::Let(l), SyntaxExpr::Let(r)) => l.spanless_eq(r),
                 (SyntaxExpr::LetRec(l), SyntaxExpr::LetRec(r)) => l.spanless_eq(r),
                 _ => false,

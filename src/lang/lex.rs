@@ -57,6 +57,7 @@ pub fn lexer<'src>()
         .to_slice()
         .map(|s| match s {
             "=>" => Token::PattArm,
+            "<-" => Token::BindArrow,
             "=" => Token::Assign,
             _ => Token::Ident(s),
         });

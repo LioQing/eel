@@ -119,6 +119,21 @@ pub fn resolve<'src>(
 ) -> Spanned<Expr<'src>> {
     let expr = match expr {
         SyntaxExpr::Atom(expr) => expr,
+        SyntaxExpr::LetBind(LetBind {
+            name,
+            arrow,
+            action,
+            body,
+        }) => {
+            let params = name.map(|name| vec![name]);
+            let body = resolve_fn_body(&params.value, *body, specs);
+            let fn_span = params.span.start..body.span.end;
+            Expr::Op(Op {
+                lhs: Box::new(resolve(*action, specs)),
+                op: Box::new(Spanned::new(Expr::Var("bind"), arrow)),
+                rhs: Box::new(Spanned::new(Expr::Fn(FnExpr { params, body }), fn_span)),
+            })
+        }
         SyntaxExpr::Call(Call { callee, args }) => Expr::Call(Call {
             callee: Box::new(resolve(*callee, specs)),
             args: args.map(|args| args.into_iter().map(|arg| resolve(arg, specs)).collect()),

@@ -58,9 +58,9 @@ fn test_out_of_range_integer_fails_with_source_diagnostic() {
 #[test]
 fn test_lex_error_prevents_all_program_execution() {
     for source in [
-        "Io(print(123456789). bind fn(_) { pure(9223372036854775808). })",
+        "Io(print(123456789). bind fn(_) { return(9223372036854775808). })",
         "let x = 9223372036854775808 Io(print(123456789).)",
-        "Io(eprint(123456789). bind fn(_) { pure(-9223372036854775809). })",
+        "Io(eprint(123456789). bind fn(_) { return(-9223372036854775809). })",
     ] {
         let file = SourceFile::new(source);
         let output = file.run();
@@ -155,19 +155,19 @@ fn test_invalid_exit_codes_have_source_diagnostics() {
 
 #[test]
 fn test_success_preserves_program_output() {
-    let output = SourceFile::new("Io(print(99). bind fn(_) { pure(42). })").run();
+    let output = SourceFile::new("Io(print(99). bind fn(_) { return(42). })").run();
     assert_exit(&output, 42, "99\n", "");
 }
 
 #[test]
 fn test_stderr_program_output_does_not_count_as_failure() {
-    let output = SourceFile::new("Io(eprint(99). bind fn(_) { pure(0). })").run();
+    let output = SourceFile::new("Io(eprint(99). bind fn(_) { return(0). })").run();
     assert_success(&output, "", "99\n");
 }
 
 #[test]
 fn test_run_file_api_returns_validated_exit_code() {
-    for (source, code) in [("42", 42), ("unit", 0), ("Io(pure(255).)", 255)] {
+    for (source, code) in [("42", 42), ("unit", 0), ("Io(return(255).)", 255)] {
         let file = SourceFile::new(source);
         assert_eq!(eel::run_file(&file.0).unwrap(), code);
     }

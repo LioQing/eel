@@ -154,11 +154,11 @@ pub fn env<'src>() -> Env<'src> {
     [
         builtin!("Io" expr env [plan] => Ok(plan.clone())),
         // These are also the constructors of plans returned by the lowercase helpers.
-        builtin!("Pure" expr env [value] => Ok(Value::Unit)),
+        builtin!("Return" expr env [value] => Ok(Value::Unit)),
         builtin!("Print" expr env [value] => Ok(Value::Unit)),
         builtin!("Eprint" expr env [value] => Ok(Value::Unit)),
         builtin!("Bind" expr env [plan, next] => Ok(Value::Unit)),
-        builtin!("pure" expr env [value] => Ok(action("Pure", expr.span, Rc::from([
+        builtin!("return" expr env [value] => Ok(action("Return", expr.span, Rc::from([
             Binding { name: "value", value: Rc::new(value.clone()) },
         ])))),
         builtin!("print" expr env [value] => Ok(action("Print", expr.span, Rc::from([

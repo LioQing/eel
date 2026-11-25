@@ -44,6 +44,7 @@ pub fn expr_and_item_parsers<
         .map(|(fixity, name)| (fixity, name.value));
 
     let mut let_rec_head = Recursive::declare();
+    let mut let_bind = Recursive::declare();
     let mut expr = Recursive::declare();
     let mut inline = Recursive::declare();
     let mut op = Recursive::declare();
@@ -62,6 +63,7 @@ pub fn expr_and_item_parsers<
     let paren = op
         .clone()
         .or(inline.clone())
+        .or(let_bind.clone())
         .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
         .recover_with(via_parser(nested_delimiters(
             Token::OpenParen,
@@ -80,6 +82,7 @@ pub fn expr_and_item_parsers<
         .foldl_with(
             op.clone()
                 .or(inline.clone())
+                .or(let_bind.clone())
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
@@ -220,6 +223,26 @@ pub fn expr_and_item_parsers<
             body,
         });
 
+    let_bind.define(
+        just(Token::Let)
+            .ignore_then(ident.map_with(|name, e| Spanned::new(name, e.span())))
+            .then(just(Token::BindArrow).map_with(|_, e| e.span()))
+            .then(inline.clone())
+            .then(expr.clone())
+            .map_with(|(((name, arrow), action), body), e| {
+                Spanned::new(
+                    SyntaxExpr::LetBind(LetBind {
+                        name,
+                        arrow,
+                        action: Box::new(action),
+                        body: Box::new(body),
+                    }),
+                    e.span(),
+                )
+            })
+            .labelled("let bind expression"),
+    );
+
     let_rec_head.define(
         just(Token::Let).ignore_then(
             rec_fn
@@ -257,7 +280,7 @@ pub fn expr_and_item_parsers<
         })
         .labelled("recursive let expression");
 
-    expr.define(choice((op, inline, r#let, let_rec)).labelled("expression"));
+    expr.define(choice((op, inline, r#let, let_bind, let_rec)).labelled("expression"));
 
     let let_item = let_head
         .then(expr.clone())

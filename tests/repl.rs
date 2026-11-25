@@ -118,7 +118,7 @@ fn test_repl_runs_io_only_for_expression_results() {
     let output = run_repl(
         "\
 42
-let action = Io(print(7). bind fn(_) { eprint(8). } bind fn(_) { pure(9). })
+let action = Io(print(7). bind fn(_) { eprint(8). } bind fn(_) { return(9). })
 it
 action
 it + 1

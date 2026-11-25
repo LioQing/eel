@@ -166,6 +166,12 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 expr.span,
                 callee.span,
             )?),
+            v @ Value::Struct(_) => {
+                return Err(Error {
+                    msg: format!("Expected a function, but got {v}. Use `.` to evaluate it"),
+                    span: expr.span,
+                });
+            }
             v => {
                 return Err(Error {
                     msg: format!("Expected a function, but got {v}"),

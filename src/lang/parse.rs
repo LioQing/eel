@@ -88,8 +88,7 @@ pub fn expr_and_item_parsers<
         )))
         .labelled("block expression");
 
-    let argument = op.clone().or(inline.clone()).or(let_bind.clone());
-    let paren = parenthesized(argument.clone())
+    let paren = parenthesized(op.clone().or(inline.clone()).or(let_bind.clone()))
         .map_with(|paren, e| match paren {
             Parenthesized::Empty => {
                 Spanned::new(SyntaxExpr::Atom(Expr::Lit(Value::Unit)), e.span())
@@ -112,7 +111,7 @@ pub fn expr_and_item_parsers<
     let postfix = atom
         .clone()
         .foldl_with(
-            argument
+            expr.clone()
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()

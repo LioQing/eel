@@ -20,22 +20,31 @@ fn test_let_pattern_requires_a_complete_match() {
         "let (x, 0) = (42, 1) missing",
         "let Box = fn(x) x let old = Box(42) let Box = fn(x) x let Box(y) = old missing",
     ] {
-        assert_failure(&SourceFile::new(source).run(), "did not match value");
+        let output = SourceFile::new(source).run();
+        assert_failure(&output, "did not match value");
+        assert_failure(&output, "Initializer supplied here");
     }
 }
 
 #[test]
 fn test_parameter_patterns_match_at_application_and_keep_positional_args() {
-    assert_failure(
-        &SourceFile::new("let f = fn((x, y)) missing let unused = f(0) 42").run(),
-        "Pattern (x, y) did not match value 0",
-    );
+    let output = SourceFile::new("let f = fn((x, y)) missing let unused = f(0) 42").run();
+    assert_failure(&output, "Pattern (x, y) did not match value 0");
+    assert_failure(&output, "Argument passed here");
     assert_returned(
         "let f = fn((x, y), 7) missing
          let f((a, b), tag) = f((20, 15), 7)
          a + b + tag",
         42,
     );
+}
+
+#[test]
+fn test_argument_evaluation_error_does_not_get_a_pattern_label() {
+    let output = SourceFile::new("let f = fn((x, y)) x f(missing).").run();
+    assert_failure(&output, "Variable `missing` not found");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(!stderr.contains("Argument passed here"), "{stderr}");
 }
 
 #[test]

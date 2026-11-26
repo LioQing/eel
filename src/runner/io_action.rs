@@ -25,10 +25,10 @@ pub fn run_result<'src>(
         return Ok(result.value);
     }
     let [plan] = wrapper.args.as_ref() else {
-        return Err(ActionError::Runtime(Error {
-            msg: "Expected one argument in `Io(plan)`".into(),
-            span: result.span,
-        }));
+        return Err(ActionError::Runtime(Error::new(
+            result.span,
+            "Expected one argument in `Io(plan)`",
+        )));
     };
 
     let mut current = Rc::clone(&plan.value);
@@ -36,10 +36,10 @@ pub fn run_result<'src>(
     let mut pending = Vec::new();
     loop {
         let Value::Struct(plan) = current.as_ref() else {
-            return Err(ActionError::Runtime(Error {
-                msg: "Expected an IO action struct".into(),
+            return Err(ActionError::Runtime(Error::new(
                 span,
-            }));
+                "Expected an IO action struct",
+            )));
         };
 
         let action_name = match plan.ctor {
@@ -60,10 +60,10 @@ pub fn run_result<'src>(
                 let next = match next.value.as_ref() {
                     Value::Closure(next) if next.definition().params.len() == 1 => next,
                     _ => {
-                        return Err(ActionError::Runtime(Error {
-                            msg: "Expected a unary function in `IoBind(plan, next)`".into(),
-                            span: plan.body.span,
-                        }));
+                        return Err(ActionError::Runtime(Error::new(
+                            plan.body.span,
+                            "Expected a unary function in `IoBind(plan, next)`",
+                        )));
                     }
                 };
                 span = plan.body.span;
@@ -72,17 +72,16 @@ pub fn run_result<'src>(
                 continue;
             }
             (Some(name @ ("IoReturn" | "Print" | "Eprint" | "IoBind")), _) => {
-                return Err(ActionError::Runtime(Error {
-                    msg: format!("Wrong number of arguments for IO action `{name}`"),
+                return Err(ActionError::Runtime(Error::new(
                     span,
-                }));
+                    format!("Wrong number of arguments for IO action `{name}`"),
+                )));
             }
             _ => {
-                return Err(ActionError::Runtime(Error {
-                    msg: "Expected an IO action (`IoReturn`, `Print`, `Eprint`, or `IoBind`)"
-                        .into(),
+                return Err(ActionError::Runtime(Error::new(
                     span,
-                }));
+                    "Expected an IO action (`IoReturn`, `Print`, `Eprint`, or `IoBind`)",
+                )));
             }
         };
 

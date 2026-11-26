@@ -821,6 +821,24 @@ mod interp {
     pub struct Error {
         pub msg: String,
         pub span: Span,
+        pub secondary: Option<(Span, &'static str)>,
+    }
+
+    impl Error {
+        pub fn new(span: Span, msg: impl Into<String>) -> Self {
+            Self {
+                msg: msg.into(),
+                span,
+                secondary: None,
+            }
+        }
+
+        pub fn with_secondary(mut self, span: Span, label: &'static str) -> Self {
+            if span != self.span {
+                self.secondary = Some((span, label));
+            }
+            self
+        }
     }
 
     pub type Env<'src> = rpds::HashTrieMap<&'src str, Rc<Value<'src>>>;

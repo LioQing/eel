@@ -153,21 +153,19 @@ from `print(x).` and `eprint(x).` write to standard output and standard
 error, respectively, and return `unit`.
 
 `first io_bind next` builds a plan that runs `first`, then applies and
-evaluates the unary function `next` with the result. `next` must return
-a plan without an `Io` wrapper. `io_bind` groups to the left by default, so
-you can chain several actions.
+evaluates the unary function `next` with the result. `io_bind` groups to
+the left by default, so you can chain several actions.
 
 Use `let x <- action` to name the result for the rest of the expression:
 
 ```text
-Io(case IoMonad {
-    Monad(bind, return) => {
-        let x <- return(20).
-        let y <- return(x + 2).
-        let _ <- print(y).
-        return(x + y).
-    }
-})
+Io(
+    let Monad(bind, return) = IoMonad
+    let x <- return(20).
+    let y <- return(x + 2).
+    let _ <- print(y).
+    return(x + y).
+)
 // Prints 22 and returns 42.
 ```
 

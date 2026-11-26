@@ -23,23 +23,23 @@ fn insert_bindings<'src>(env: &mut Env<'src>, bindings: impl IntoIterator<Item =
 
 fn prepare_closure_call<'src>(
     closure: &Closure<'src>,
-    args: impl ExactSizeIterator<Item = Result<Rc<Value<'src>>, Error>>,
+    args: impl ExactSizeIterator<Item = Result<(Rc<Value<'src>>, Option<Span>), Error>>,
     call_span: Span,
     callee_span: Span,
 ) -> Result<Struct<'src>, Error> {
     let name = closure.name;
     let ClosureDef { params, body, .. } = closure.definition();
     if params.len() != args.len() {
-        return Err(Error {
-            msg: format!(
+        return Err(Error::new(
+            call_span,
+            format!(
                 "Expected {} arguments for function {}, but got {}",
                 params.len(),
                 name.map(|n| format!("`{n}`"))
                     .unwrap_or_else(|| "<anonymous>".to_string()),
                 args.len(),
             ),
-            span: call_span,
-        });
+        ));
     }
 
     let body = builtin::with_span(Rc::clone(body), callee_span);
@@ -54,8 +54,13 @@ fn prepare_closure_call<'src>(
         .iter()
         .zip(args)
         .map(|(patt, arg)| {
-            let value = arg?;
-            insert_bindings(&mut applied_env, require_match(patt, &value, &pattern_env)?);
+            let (value, span) = arg?;
+            let bindings =
+                require_match(patt, &value, &pattern_env).map_err(|error| match span {
+                    Some(span) => error.with_secondary(span, "Argument passed here"),
+                    None => error,
+                })?;
+            insert_bindings(&mut applied_env, bindings);
 
             let name = match patt.value {
                 Patt::Var(binder) => Some(binder.name),
@@ -132,14 +137,14 @@ fn validate_operator_arity(name: Option<&str>, arity: usize, span: Span) -> Resu
         return Ok(());
     }
 
-    Err(Error {
-        msg: format!(
+    Err(Error::new(
+        span,
+        format!(
             "Expected an operator, which is a function with exactly 2 parameters, but {} has {arity}",
             name.map(|n| format!("`{n}`"))
                 .unwrap_or_else(|| "<anonymous>".to_string())
         ),
-        span,
-    })
+    ))
 }
 
 fn require_match<'src>(
@@ -147,9 +152,11 @@ fn require_match<'src>(
     value: &Rc<Value<'src>>,
     env: &Env<'src>,
 ) -> Result<Bindings<'src>, Error> {
-    match_patt(patt, value, env).ok_or_else(|| Error {
-        msg: format!("Pattern {} did not match value {value}", patt.value),
-        span: patt.span,
+    match_patt(patt, value, env).ok_or_else(|| {
+        Error::new(
+            patt.span,
+            format!("Pattern {} did not match value {value}", patt.value),
+        )
     })?
 }
 
@@ -160,12 +167,12 @@ fn validated_binding<'src>(
 ) -> Result<Binding<'src>, Error> {
     if binder.fixity.is_some() {
         let Value::Closure(closure) = value.as_ref() else {
-            return Err(Error {
-                msg: format!(
+            return Err(Error::new(
+                span,
+                format!(
                     "Expected an operator, which is a function with exactly 2 parameters, but got {value}"
                 ),
-                span,
-            });
+            ));
         };
 
         validate_operator_arity(Some(binder.name), closure.definition().params.len(), span)?;
@@ -185,7 +192,9 @@ pub fn bind<'src>(
 ) -> Result<(), Error> {
     let Patt::Var(binder) = patt.value else {
         let value = Rc::new(eval(expr, env.clone())?);
-        let bindings = require_match(patt, &value, env)?;
+        let bindings = require_match(patt, &value, env)
+            .map_err(|error| error.with_secondary(expr.span, "Initializer supplied here"))?;
+
         insert_bindings(env, bindings);
         return Ok(());
     };
@@ -215,7 +224,9 @@ pub fn bind<'src>(
         }
     };
 
-    let binding = validated_binding(binder, Rc::new(v), expr.span)?;
+    let binding = validated_binding(binder, Rc::new(v), patt.span)
+        .map_err(|error| error.with_secondary(expr.span, "Initializer supplied here"))?;
+
     env.insert_mut(binding.name, binding.value);
     Ok(())
 }
@@ -260,7 +271,8 @@ pub fn eval_unary_closure<'src>(
     arg: Rc<Value<'src>>,
     span: Span,
 ) -> Result<Value<'src>, Error> {
-    let applied = prepare_closure_call(closure, std::iter::once(Ok(arg)), span, span)?;
+    // The runner supplies an evaluated value, not a source-level argument.
+    let applied = prepare_closure_call(closure, std::iter::once(Ok((arg, None))), span, span)?;
     eval(&applied.body, applied.applied_env)
 }
 
@@ -272,10 +284,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
         Expr::Var(x) => env
             .get(*x)
             .map(|v| v.as_ref().clone())
-            .ok_or_else(|| Error {
-                msg: format!("Variable `{x}` not found"),
-                span: expr.span,
-            })?,
+            .ok_or_else(|| Error::new(expr.span, format!("Variable `{x}` not found")))?,
         Expr::Tuple(elements) => Value::Tuple(
             elements
                 .iter()
@@ -285,23 +294,23 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
         Expr::Call(Call { callee, args }) => match eval(callee, env.clone())? {
             Value::Closure(closure) => Value::Struct(prepare_closure_call(
                 &closure,
-                args.value
-                    .iter()
-                    .map(|arg| eval(arg, env.clone()).map(Rc::new)),
+                args.value.iter().map(|arg| {
+                    eval(arg, env.clone()).map(|value| (Rc::new(value), Some(arg.span)))
+                }),
                 expr.span,
                 callee.span,
             )?),
             v @ Value::Struct(_) => {
-                return Err(Error {
-                    msg: format!("Expected a function, but got {v}. Use `.` to evaluate it"),
-                    span: expr.span,
-                });
+                return Err(Error::new(
+                    expr.span,
+                    format!("Expected a function, but got {v}. Use `.` to evaluate it"),
+                ));
             }
             v => {
-                return Err(Error {
-                    msg: format!("Expected a function, but got {v}"),
-                    span: expr.span,
-                });
+                return Err(Error::new(
+                    expr.span,
+                    format!("Expected a function, but got {v}"),
+                ));
             }
         },
         Expr::Eval(operand) => match eval(operand, env)? {
@@ -309,10 +318,10 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 body, applied_env, ..
             }) => eval(&body, applied_env)?,
             v => {
-                return Err(Error {
-                    msg: format!("Expected a struct, but got {v}"),
-                    span: expr.span,
-                });
+                return Err(Error::new(
+                    expr.span,
+                    format!("Expected a struct, but got {v}"),
+                ));
             }
         },
         Expr::Fn(FnExpr { params, body }) => Value::Closure(Closure {
@@ -337,13 +346,15 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 .find_map(|CaseArm { patt, body }| {
                     match_patt(patt, &v, &env).map(|bindings| (bindings, body))
                 })
-                .ok_or_else(|| Error {
-                    msg: format!("No pattern matched for value {v}"),
-                    span: expr.span,
+                .ok_or_else(|| {
+                    Error::new(expr.span, format!("No pattern matched for value {v}"))
                 })?;
 
+            let bindings = patt_bindings
+                .map_err(|error| error.with_secondary(scrutinee.span, "Value matched here"))?;
+
             let mut new_env = env;
-            insert_bindings(&mut new_env, patt_bindings?);
+            insert_bindings(&mut new_env, bindings);
 
             eval(body, new_env)?
         }
@@ -355,9 +366,9 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
 
                 let applied = prepare_closure_call(
                     &closure,
-                    [lhs, rhs]
-                        .into_iter()
-                        .map(|arg| eval(arg, env.clone()).map(Rc::new)),
+                    [lhs, rhs].into_iter().map(|arg| {
+                        eval(arg, env.clone()).map(|value| (Rc::new(value), Some(arg.span)))
+                    }),
                     expr.span,
                     op.span,
                 )?;
@@ -365,10 +376,10 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 eval(&applied.body, applied.applied_env)?
             }
             v => {
-                return Err(Error {
-                    msg: format!("Expected an operator, but got {v}"),
-                    span: op.span,
-                });
+                return Err(Error::new(
+                    op.span,
+                    format!("Expected an operator, but got {v}"),
+                ));
             }
         },
         Expr::Let(Let { patt, init, body }) => {
@@ -1184,10 +1195,7 @@ mod tests {
         let expr = evaluate(call(var("f"), vec![]));
         assert_eq!(
             eval(&expr, env_from([("f", closure), ("x", Value::Int(42))])),
-            Err(Error {
-                msg: "Variable `x` not found".into(),
-                span: (12..13).into()
-            })
+            Err(Error::new((12..13).into(), "Variable `x` not found"))
         );
     }
 

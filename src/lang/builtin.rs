@@ -23,10 +23,9 @@ macro_rules! builtin {
                                 #[allow(unused_variables)]
                                 let $param = env.get(stringify!($param))
                                     .map(Rc::as_ref)
-                                    .ok_or_else(|| Error {
-                                        msg: format!("Variable `{}` not found", stringify!($param)),
-                                        span: expr.span,
-                                    })?;
+                                    .ok_or_else(|| Error::new(
+                                        expr.span, format!("Variable `{}` not found", stringify!($param)),
+                                    ))?;
                             )*
                             $body
                         }), 0..0)),
@@ -205,74 +204,44 @@ pub fn env<'src>() -> Env<'src> {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => a.checked_add(*b)
                 .map(Value::Int)
-                .ok_or_else(|| Error {
-                    msg: format!("Integer overflow: {a} + {b}"),
-                    span: expr.span,
-                }),
+                .ok_or_else(|| Error::new(expr.span, format!("Integer overflow: {a} + {b}"))),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-            _ => Err(Error {
-                msg: format!("Cannot add {a} and {b}"),
-                span: expr.span,
-            }),
+            _ => Err(Error::new(expr.span, format!("Cannot add {a} and {b}"))),
         }
     });
     let sub = builtin!("-" expr env [a, b] => {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => a.checked_sub(*b)
                 .map(Value::Int)
-                .ok_or_else(|| Error {
-                    msg: format!("Integer overflow: {a} - {b}"),
-                    span: expr.span,
-                }),
+                .ok_or_else(|| Error::new(expr.span, format!("Integer overflow: {a} - {b}"))),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
-            _ => Err(Error {
-                msg: format!("Cannot subtract {b} from {a}"),
-                span: expr.span,
-            }),
+            _ => Err(Error::new(expr.span, format!("Cannot subtract {b} from {a}"))),
         }
     });
     let mul = builtin!("*" expr env [a, b] => {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => a.checked_mul(*b)
                 .map(Value::Int)
-                .ok_or_else(|| Error {
-                    msg: format!("Integer overflow: {a} * {b}"),
-                    span: expr.span,
-                }),
+                .ok_or_else(|| Error::new(expr.span, format!("Integer overflow: {a} * {b}"))),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-            _ => Err(Error {
-                msg: format!("Cannot multiply {a} and {b}"),
-                span: expr.span,
-            }),
+            _ => Err(Error::new(expr.span, format!("Cannot multiply {a} and {b}"))),
         }
     });
     let div = builtin!("/" expr env [a, b] => {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) if *b != 0 => a.checked_div(*b)
                 .map(Value::Int)
-                .ok_or_else(|| Error {
-                    msg: format!("Integer overflow: {a} / {b}"),
-                    span: expr.span,
-                }),
+                .ok_or_else(|| Error::new(expr.span, format!("Integer overflow: {a} / {b}"))),
             (Value::Float(a), Value::Float(b)) if *b != 0.0 => Ok(Value::Float(a / b)),
-            _ => Err(Error {
-                msg: format!("Cannot divide {a} by {b}"),
-                span: expr.span,
-            }),
+            _ => Err(Error::new(expr.span, format!("Cannot divide {a} by {b}"))),
         }
     });
     let rem = builtin!("%" expr env [a, b] => {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) if *b != 0 => a.checked_rem(*b)
                 .map(Value::Int)
-                .ok_or_else(|| Error {
-                    msg: format!("Integer overflow: {a} % {b}"),
-                    span: expr.span,
-                }),
-            _ => Err(Error {
-                msg: format!("Cannot modulo {a} by {b}"),
-                span: expr.span,
-            }),
+                .ok_or_else(|| Error::new(expr.span, format!("Integer overflow: {a} % {b}"))),
+            _ => Err(Error::new(expr.span, format!("Cannot modulo {a} by {b}"))),
         }
     });
     let eq = builtin!("==" expr env [a, b] => {
@@ -280,10 +249,7 @@ pub fn env<'src>() -> Env<'src> {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a == b { 1 } else { 0 })),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a == b { 1 } else { 0 })),
             (Value::Unit, Value::Unit) => Ok(Value::Int(1)),
-            _ => Err(Error {
-                msg: format!("Cannot compare {a} and {b} for equality"),
-                span: expr.span,
-            }),
+            _ => Err(Error::new(expr.span, format!("Cannot compare {a} and {b} for equality"))),
         }
     });
     let ne = builtin!("!=" expr env [a, b] => {
@@ -291,50 +257,35 @@ pub fn env<'src>() -> Env<'src> {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a != b { 1 } else { 0 })),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a != b { 1 } else { 0 })),
             (Value::Unit, Value::Unit) => Ok(Value::Int(0)),
-            _ => Err(Error {
-                msg: format!("Cannot compare {a} and {b} for inequality"),
-                span: expr.span,
-            }),
+            _ => Err(Error::new(expr.span, format!("Cannot compare {a} and {b} for inequality"))),
         }
     });
     let gt = builtin!(">" expr env [a, b] => {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a > b { 1 } else { 0 })),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a > b { 1 } else { 0 })),
-            _ => Err(Error {
-                msg: format!("Cannot compare {a} and {b} for greater than"),
-                span: expr.span,
-            }),
+            _ => Err(Error::new(expr.span, format!("Cannot compare {a} and {b} for greater than"))),
         }
     });
     let lt = builtin!("<" expr env [a, b] => {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a < b { 1 } else { 0 })),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a < b { 1 } else { 0 })),
-            _ => Err(Error {
-                msg: format!("Cannot compare {a} and {b} for less than"),
-                span: expr.span,
-            }),
+            _ => Err(Error::new(expr.span, format!("Cannot compare {a} and {b} for less than"))),
         }
     });
     let ge = builtin!(">=" expr env [a, b] => {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a >= b { 1 } else { 0 })),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a >= b { 1 } else { 0 })),
-            _ => Err(Error {
-                msg: format!("Cannot compare {a} and {b} for greater than or equal"),
-                span: expr.span,
-            }),
+            _ => Err(Error::new(expr.span, format!("Cannot compare {a} and {b} for greater than or equal"))),
         }
     });
     let le = builtin!("<=" expr env [a, b] => {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a <= b { 1 } else { 0 })),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a <= b { 1 } else { 0 })),
-            _ => Err(Error {
-                msg: format!("Cannot compare {a} and {b} for less than or equal"),
-                span: expr.span,
-            }),
+            _ => Err(Error::new(expr.span, format!("Cannot compare {a} and {b} for less than or equal"))),
         }
     });
 
@@ -852,10 +803,7 @@ mod tests {
             for (expr, span) in applications(op, Value::Int(a), Value::Int(b)) {
                 assert_eq!(
                     interp::eval(&expr, env()),
-                    Err(Error {
-                        msg: format!("Integer overflow: {a} {op} {b}"),
-                        span,
-                    }),
+                    Err(Error::new(span, format!("Integer overflow: {a} {op} {b}"))),
                     "{a} {op} {b}",
                 );
             }

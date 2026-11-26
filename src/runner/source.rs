@@ -1,9 +1,11 @@
 use std::{
+    cell::OnceCell,
     fmt,
     io::{self, Write},
+    ops::Range,
 };
 
-use ariadne::{Color, Label, Report, ReportKind, Source as ReportSource};
+use ariadne::{Cache, Color, Label, Report, ReportKind, Source as ReportSource};
 use chumsky::prelude::*;
 use typed_arena::Arena;
 
@@ -17,7 +19,7 @@ pub struct Diagnostic {
     span: Span,
     message: String,
     reason: String,
-    contexts: Vec<(String, Span)>,
+    secondary_labels: Vec<(Span, String)>,
 }
 
 impl Diagnostic {
@@ -26,7 +28,7 @@ impl Diagnostic {
             span,
             reason: message.clone(),
             message,
-            contexts: Vec::new(),
+            secondary_labels: Vec::new(),
         }
     }
 
@@ -35,9 +37,14 @@ impl Diagnostic {
             span: offset_span(*error.span(), offset),
             message: error.to_string(),
             reason: error.reason().to_string(),
-            contexts: error
+            secondary_labels: error
                 .contexts()
-                .map(|(label, span)| (label.to_string(), offset_span(*span, offset)))
+                .map(|(label, span)| {
+                    (
+                        offset_span(*span, offset),
+                        format!("while parsing this {label}"),
+                    )
+                })
                 .collect(),
         }
     }
@@ -51,7 +58,11 @@ impl<T: fmt::Display> From<Rich<'_, T>> for Diagnostic {
 
 impl From<Error> for Diagnostic {
     fn from(error: Error) -> Self {
-        Self::new(error.span, error.msg)
+        let mut diagnostic = Self::new(error.span, error.msg);
+        if let Some((span, label)) = error.secondary {
+            diagnostic.secondary_labels.push((span, label.into()));
+        }
+        diagnostic
     }
 }
 
@@ -63,6 +74,7 @@ pub struct Source<'src> {
     name: String,
     text: &'src str,
     start: usize,
+    report_source: OnceCell<ReportSource<&'src str>>,
 }
 
 impl<'src> Source<'src> {
@@ -88,30 +100,24 @@ impl<'src> Source<'src> {
         Ok(tokens)
     }
 
-    fn write_diagnostic(&self, error: Diagnostic, output: impl Write) -> io::Result<()> {
-        let location = |span: Span| {
-            (
-                self.name.as_str(),
-                span.start - self.start..span.end - self.start,
-            )
-        };
-        Report::build(ReportKind::Error, location(error.span))
-            .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
-            .with_message(error.message)
-            .with_label(
-                Label::new(location(error.span))
-                    .with_message(error.reason)
-                    .with_color(Color::Red),
-            )
-            .with_labels(error.contexts.into_iter().map(|(label, span)| {
-                Label::new(location(span))
-                    .with_message(format!("while parsing this {label}"))
-                    .with_color(Color::Yellow)
-            }))
-            .finish()
-            .write((self.name.as_str(), ReportSource::from(self.text)), output)
+    fn report_source(&self) -> &ReportSource<&'src str> {
+        self.report_source
+            .get_or_init(|| ReportSource::from(self.text))
+    }
+
+    fn char_offset(&self, offset: usize) -> usize {
+        let report = self.report_source();
+        match report.get_byte_line(offset) {
+            Some((line, _, column)) => {
+                line.offset() + self.text[offset - column..offset].chars().count()
+            }
+            None => report.len(),
+        }
     }
 }
+
+// The index identifies the source independently of its display name.
+type SourceId<'a> = (usize, &'a str);
 
 /// Gives each source a disjoint byte range so saved AST spans still identify
 /// their source even when evaluated by later REPL input.
@@ -133,8 +139,28 @@ impl<'src> SourceMap<'src> {
         let start = self.entries.last().map_or(0, |source| source.eof().end + 1);
         // ASTs borrow identifiers directly from input text.
         let text = self.arena.alloc(text).as_str();
-        self.entries.push(Source { name, text, start });
+        self.entries.push(Source {
+            name,
+            text,
+            start,
+            report_source: OnceCell::new(),
+        });
         self.entries.last().unwrap()
+    }
+
+    fn location(&self, span: Span) -> (SourceId<'_>, Range<usize>) {
+        let index = self
+            .entries
+            .partition_point(|source| source.start <= span.start)
+            - 1;
+        let source = &self.entries[index];
+        // Ariadne 0.5 uses character offsets for the headers of secondary
+        // sources even in byte mode. Convert all labels here to keep them consistent.
+        (
+            (index, source.name.as_str()),
+            source.char_offset(span.start - source.start)
+                ..source.char_offset(span.end - source.start),
+        )
     }
 
     pub fn write_diagnostics(
@@ -143,14 +169,38 @@ impl<'src> SourceMap<'src> {
         mut output: impl Write,
     ) -> io::Result<()> {
         for error in errors {
-            let index = self
-                .entries
-                .partition_point(|source| source.start <= error.span.start);
-            let source = &self.entries[index - 1];
-            // Parse contexts are from the same source as the primary span.
-            source.write_diagnostic(error, &mut output)?;
+            let primary = self.location(error.span);
+            Report::build(ReportKind::Error, primary.clone())
+                .with_message(error.message)
+                .with_label(
+                    Label::new(primary)
+                        .with_message(error.reason)
+                        .with_color(Color::Red),
+                )
+                .with_labels(error.secondary_labels.into_iter().map(|(span, label)| {
+                    Label::new(self.location(span))
+                        .with_message(label)
+                        .with_color(Color::Yellow)
+                }))
+                .finish()
+                .write(self, &mut output)?;
         }
         Ok(())
+    }
+}
+
+impl<'src> Cache<SourceId<'_>> for &SourceMap<'src> {
+    type Storage = &'src str;
+
+    fn fetch(
+        &mut self,
+        &(index, _): &SourceId<'_>,
+    ) -> Result<&ReportSource<Self::Storage>, impl fmt::Debug> {
+        self.entries.get(index).map(Source::report_source).ok_or(())
+    }
+
+    fn display<'a>(&self, &(_, name): &'a SourceId<'_>) -> Option<impl fmt::Display + 'a> {
+        Some(name)
     }
 }
 

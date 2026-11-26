@@ -119,6 +119,36 @@ fn test_repl_recovers_from_errors_and_reports_the_original_definition() {
 }
 
 #[test]
+fn test_repl_reports_the_failed_pattern_and_its_argument_across_submissions() {
+    let output = run_repl("let α = 1\nlet f = fn(1, (x, y)) { x }\nf(α, 42)\n");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    for expected in [
+        "Pattern (x, y) did not match value 42",
+        "<repl:2>:1:15",
+        "<repl:3>:1:6",
+        "Argument passed here",
+    ] {
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+    assert_eq!(stderr.matches("Error:").count(), 1, "{stderr}");
+}
+
+#[test]
+fn test_repl_reports_the_operand_that_failed_to_match() {
+    let output = run_repl("let f = fn(x, (y, z)) { x }\n0 f 42\n");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    for expected in [
+        "Pattern (y, z) did not match value 42",
+        "<repl:2>:1:5",
+        "Argument passed here",
+    ] {
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
+#[test]
 fn test_file_mode_still_requires_a_let_body() {
     let file = SourceFile::new("let x = 42");
     assert_failure(&file.run(), "Parsing failed");

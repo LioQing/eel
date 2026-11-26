@@ -39,17 +39,21 @@ fn reduce_op<'src>(operands: &mut Vec<Spanned<Expr<'src>>>, op: Spanned<Expr<'sr
 }
 
 fn shadow_patt<'src>(patt: &Patt<'src>, specs: &mut Vec<OpSpec<'src>>) {
-    match patt {
-        Patt::Var(name) => specs.push(OpSpec {
-            name,
-            fixity: Fixity::default(),
-        }),
-        Patt::Struct(StructPatt { args, .. }) => {
-            for patt in &args.value {
-                shadow_patt(&patt.value, specs);
-            }
+    let children = match patt {
+        Patt::Var(name) => {
+            specs.push(OpSpec {
+                name,
+                fixity: Fixity::default(),
+            });
+            return;
         }
-        Patt::Lit(_) => {}
+        Patt::Tuple(elements) => elements,
+        Patt::Struct(patt) => &patt.args.value,
+        Patt::Lit(_) => return,
+    };
+
+    for child in children {
+        shadow_patt(&child.value, specs);
     }
 }
 
@@ -119,6 +123,12 @@ pub fn resolve<'src>(
 ) -> Spanned<Expr<'src>> {
     let expr = match expr {
         SyntaxExpr::Atom(expr) => expr,
+        SyntaxExpr::Tuple(elements) => Expr::Tuple(
+            elements
+                .into_iter()
+                .map(|element| resolve(element, specs))
+                .collect(),
+        ),
         SyntaxExpr::LetBind(LetBind {
             name,
             arrow,

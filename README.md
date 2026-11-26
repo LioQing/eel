@@ -62,6 +62,30 @@ but the list code never evaluates them. The full
 [list example](examples/cons.eel) also defines `map`, which takes a function
 as an argument and uses `f(x).` to compute each new element.
 
+### Tuples
+
+Tuples are positional values. `(x, y)` is a pair, `(x,)` is a one-element
+tuple, `(x)` just groups `x`, and `()` is another spelling of `unit`. A
+trailing comma is allowed. `f(x, y)` passes two arguments, while `f((x, y))`
+passes one tuple. Tuple elements are evaluated left to right, but a struct
+stored in a tuple is not forced.
+
+```text
+let point = (20, (22,))
+case point {
+    (x, (y,)) => { x + y }
+    _ => 0
+}
+// 42
+```
+
+Tuple patterns match by position and require the same number of elements.
+As with calls elsewhere in Eel, whitespace before `(` does not separate
+expressions. If a tuple starts the body of a `let`, use a block, as in
+`let x = 1 { (x,) }`. In a `case`, a tuple pattern following an arm body
+can look like a call on that body. Put the tuple arm first when possible,
+or use a nested `case` to separate the arms.
+
 ## Where the idea came from
 
 I wrote an [arithmetic expression evaluator with variable substitution][calc]

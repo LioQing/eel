@@ -68,6 +68,24 @@ impl SpanlessPartialEq for Vec<&str> {
     }
 }
 
+fn fmt_tuple(
+    f: &mut fmt::Formatter<'_>,
+    elements: impl ExactSizeIterator<Item = impl fmt::Display>,
+) -> fmt::Result {
+    let singleton = elements.len() == 1;
+    write!(f, "(")?;
+    for (index, element) in elements.enumerate() {
+        if index > 0 {
+            write!(f, ", ")?;
+        }
+        write!(f, "{element}")?;
+    }
+    if singleton {
+        write!(f, ",")?;
+    }
+    write!(f, ")")
+}
+
 mod lex {
     use super::*;
 
@@ -344,6 +362,7 @@ mod parse {
     #[derive(Debug, Clone, PartialEq)]
     pub enum SyntaxExpr<'src> {
         Atom(Expr<'src>),
+        Tuple(Vec<Spanned<Self>>),
         Call(Call<Self>),
         Eval(Box<Spanned<Self>>),
         Fn(FnExpr<'src, Box<Spanned<Self>>>),
@@ -358,6 +377,7 @@ mod parse {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 SyntaxExpr::Atom(expr) => write!(f, "{expr}"),
+                SyntaxExpr::Tuple(elements) => fmt_tuple(f, elements.iter().map(|e| &e.value)),
                 SyntaxExpr::Call(Call { callee, args }) => write!(
                     f,
                     "{}({})",
@@ -431,6 +451,7 @@ mod parse {
         fn spanless_eq(&self, other: &Self) -> bool {
             match (self, other) {
                 (SyntaxExpr::Atom(l), SyntaxExpr::Atom(r)) => l.spanless_eq(r),
+                (SyntaxExpr::Tuple(l), SyntaxExpr::Tuple(r)) => l.spanless_eq(r),
                 (SyntaxExpr::Call(l), SyntaxExpr::Call(r)) => l.spanless_eq(r),
                 (SyntaxExpr::Eval(l), SyntaxExpr::Eval(r)) => l.spanless_eq(r),
                 (SyntaxExpr::Fn(l), SyntaxExpr::Fn(r)) => l.spanless_eq(r),
@@ -537,6 +558,7 @@ mod fixity {
         Unit,
         Float(f64),
         Int(i64),
+        Tuple(Rc<[Rc<Self>]>),
         Closure(Closure<'src>),
         Struct(Struct<'src>),
     }
@@ -547,6 +569,7 @@ mod fixity {
                 Value::Unit => write!(f, "unit"),
                 Value::Float(value) => write!(f, "{value}"),
                 Value::Int(value) => write!(f, "{value}"),
+                Value::Tuple(elements) => fmt_tuple(f, elements.iter()),
                 Value::Closure(closure) => {
                     let ClosureDef {
                         rec_name,
@@ -613,6 +636,7 @@ mod fixity {
     pub enum Patt<'src> {
         Var(&'src str),
         Lit(Value<'src>),
+        Tuple(Vec<Spanned<Self>>),
         Struct(StructPatt<'src>),
     }
 
@@ -621,6 +645,7 @@ mod fixity {
             match self {
                 Patt::Var(ident) => write!(f, "{ident}"),
                 Patt::Lit(value) => write!(f, "{value}"),
+                Patt::Tuple(elements) => fmt_tuple(f, elements.iter().map(|e| &e.value)),
                 Patt::Struct(StructPatt { name, args }) => {
                     write!(
                         f,
@@ -642,6 +667,7 @@ mod fixity {
             match (self, other) {
                 (Patt::Var(l), Patt::Var(r)) => l == r,
                 (Patt::Lit(l), Patt::Lit(r)) => l.spanless_eq(r),
+                (Patt::Tuple(l), Patt::Tuple(r)) => l.spanless_eq(r),
                 (Patt::Struct(l), Patt::Struct(r)) => l.spanless_eq(r),
                 _ => false,
             }
@@ -669,6 +695,7 @@ mod fixity {
         Err,
         Lit(Value<'src>),
         Var(&'src str),
+        Tuple(Vec<Spanned<Self>>),
         Call(Call<Self>),
         Eval(Box<Spanned<Self>>),
         Fn(FnExpr<'src, Rc<Spanned<Self>>>),
@@ -685,6 +712,7 @@ mod fixity {
                 Expr::Err => write!(f, "<error>"),
                 Expr::Lit(value) => write!(f, "{value}"),
                 Expr::Var(ident) => write!(f, "{ident}"),
+                Expr::Tuple(elements) => fmt_tuple(f, elements.iter().map(|e| &e.value)),
                 Expr::Call(Call { callee, args }) => write!(
                     f,
                     "{}({})",
@@ -762,6 +790,7 @@ mod fixity {
                 (Expr::Err, Expr::Err) => true,
                 (Expr::Lit(l), Expr::Lit(r)) => l.spanless_eq(r),
                 (Expr::Var(l), Expr::Var(r)) => l == r,
+                (Expr::Tuple(l), Expr::Tuple(r)) => l.spanless_eq(r),
                 (Expr::Call(l), Expr::Call(r)) => l.spanless_eq(r),
                 (Expr::Eval(l), Expr::Eval(r)) => l.spanless_eq(r),
                 (Expr::Fn(l), Expr::Fn(r)) => l.spanless_eq(r),

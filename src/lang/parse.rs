@@ -4,6 +4,37 @@ use chumsky::{input::ValueInput, prelude::*};
 
 use super::declare::*;
 
+enum Parenthesized<T> {
+    Empty,
+    Group(T),
+    Tuple(Vec<T>),
+}
+
+fn parenthesized<'toks, 'src: 'toks, I, T>(
+    element: impl Parser<'toks, I, T, extra::Err<Rich<'toks, Token<'src>, Span>>> + Clone,
+) -> impl Parser<'toks, I, Parenthesized<T>, extra::Err<Rich<'toks, Token<'src>, Span>>> + Clone
+where
+    I: ValueInput<'toks, Token = Token<'src>, Span = Span>,
+{
+    let rest = just(Token::Comma)
+        .ignore_then(element.clone())
+        .repeated()
+        .collect::<Vec<_>>();
+
+    element
+        .then(rest)
+        .then(just(Token::Comma).or_not())
+        .or_not()
+        .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
+        .map(|contents| match contents {
+            None => Parenthesized::Empty,
+            Some(((first, rest), None)) if rest.is_empty() => Parenthesized::Group(first),
+            Some(((first, rest), _)) => {
+                Parenthesized::Tuple(std::iter::once(first).chain(rest).collect())
+            }
+        })
+}
+
 /// Builds the expression and REPL item parsers from the same grammar.
 pub fn expr_and_item_parsers<
     'toks,
@@ -60,11 +91,15 @@ pub fn expr_and_item_parsers<
         )))
         .labelled("block expression");
 
-    let paren = op
-        .clone()
-        .or(inline.clone())
-        .or(let_bind.clone())
-        .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
+    let argument = op.clone().or(inline.clone()).or(let_bind.clone());
+    let paren = parenthesized(argument.clone())
+        .map_with(|paren, e| match paren {
+            Parenthesized::Empty => {
+                Spanned::new(SyntaxExpr::Atom(Expr::Lit(Value::Unit)), e.span())
+            }
+            Parenthesized::Group(expr) => expr,
+            Parenthesized::Tuple(elements) => Spanned::new(SyntaxExpr::Tuple(elements), e.span()),
+        })
         .recover_with(via_parser(nested_delimiters(
             Token::OpenParen,
             Token::CloseParen,
@@ -80,9 +115,7 @@ pub fn expr_and_item_parsers<
     let postfix = atom
         .clone()
         .foldl_with(
-            op.clone()
-                .or(inline.clone())
-                .or(let_bind.clone())
+            argument
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
@@ -140,9 +173,17 @@ pub fn expr_and_item_parsers<
             .labelled("struct pattern");
         let var = ident.map(Patt::Var).labelled("variable pattern");
         let lit = value.map(Patt::Lit).labelled("literal pattern");
+        let paren = parenthesized(case_patt)
+            .map_with(|paren, e| match paren {
+                Parenthesized::Empty => Spanned::new(Patt::Lit(Value::Unit), e.span()),
+                Parenthesized::Group(patt) => patt,
+                Parenthesized::Tuple(elements) => Spanned::new(Patt::Tuple(elements), e.span()),
+            })
+            .labelled("parenthesized pattern");
 
         choice((r#struct, var, lit))
             .map_with(|patt, e| Spanned::new(patt, e.span()))
+            .or(paren)
             .labelled("pattern")
     });
 
@@ -541,6 +582,20 @@ mod tests {
     }
 
     #[test]
+    fn test_tuple_parentheses_and_call_arguments() {
+        let singleton = spanned(SyntaxExpr::Tuple(vec![var("x")]));
+        assert_parse!("()", atom(Expr::Lit(Value::Unit)));
+        assert_parse!("(x)", var("x"));
+        assert_parse!("(x,)", singleton.clone());
+        assert_parse!(
+            "(x, (y),)",
+            spanned(SyntaxExpr::Tuple(vec![var("x"), var("y")]))
+        );
+        assert_parse!("f(x,)", call(var("f"), vec![var("x")]));
+        assert_parse!("f((x,))", call(var("f"), vec![singleton]));
+    }
+
+    #[test]
     fn test_call_chained_calls() {
         assert_parse!(
             "foo(bar)(baz)",
@@ -630,6 +685,23 @@ mod tests {
             case(
                 var("x"),
                 vec![(struct_patt("y", vec![spanned(Patt::Var("z"))]), var("w"))]
+            ),
+        );
+    }
+
+    #[test]
+    fn test_case_tuple_pattern() {
+        assert_parse!(
+            "case x { ((), ((y),),) => y }",
+            case(
+                var("x"),
+                vec![(
+                    Patt::Tuple(vec![
+                        spanned(Patt::Lit(Value::Unit)),
+                        spanned(Patt::Tuple(vec![spanned(Patt::Var("y"))])),
+                    ]),
+                    var("y"),
+                )],
             ),
         );
     }
@@ -894,6 +966,15 @@ mod tests {
     }
 
     #[test]
+    fn test_tuple_rejects_malformed_commas() {
+        for tuple in ["(,)", "(,x)", "(x,,)", "(x,,y)", "(x,y,,)"] {
+            assert!(parse_repl_item(tuple).is_err(), "{tuple}");
+            let case = format!("case x {{ {tuple} => x }}");
+            assert!(parse_repl_item(&case).is_err(), "{case}");
+        }
+    }
+
+    #[test]
     fn test_repl_item_accepts_standalone_let_with_infix_expr() {
         let item = parse_repl_item("let x = 2 + 3 * 4").unwrap();
         let expected = ReplItem::Let(LetBinding {
@@ -962,6 +1043,8 @@ mod tests {
     fn test_repl_item_display() {
         for (src, expected) in [
             ("1 + 2", "(1 + 2)"),
+            ("let t = (1, (2,),)", "let t = (1, (2,))"),
+            ("case t { (x,) => (x,) }", "case t { (x,) => (x,) }"),
             ("let  x = 42", "let x = 42"),
             (
                 "let opr 3 sub = fn(a,b){a - b}",

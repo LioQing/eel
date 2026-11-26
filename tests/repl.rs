@@ -45,6 +45,17 @@ fn test_repl_remembers_bindings_fixity_and_it_until_quit() {
 }
 
 #[test]
+fn test_repl_persists_and_matches_tuples() {
+    let output = run_repl(
+        "let pair = (20, (22,))
+         pair
+         case it { (a, (b,)) => { a + b } }
+         let x = it { (x,) }\n",
+    );
+    assert_success(&output, "(20, (22,))\n42\n(42,)\n", "");
+}
+
+#[test]
 fn test_repl_evaluates_a_multiline_recursive_definition() {
     let output = run_repl(
         ":{

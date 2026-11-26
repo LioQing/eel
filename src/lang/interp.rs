@@ -62,6 +62,22 @@ fn prepare_closure_call<'src>(
     })
 }
 
+fn match_fields<'a, 'src: 'a>(
+    patterns: &[Spanned<Patt<'src>>],
+    values: impl ExactSizeIterator<Item = &'a Rc<Value<'src>>>,
+    env: &Env<'src>,
+) -> Option<Bindings<'src>> {
+    if patterns.len() != values.len() {
+        return None;
+    }
+
+    let mut bindings = vec![];
+    for (patt, value) in patterns.iter().zip(values) {
+        bindings.extend(match_patt(&patt.value, value, env)?);
+    }
+    Some(bindings)
+}
+
 fn match_patt<'src>(
     patt: &Patt<'src>,
     value: &Rc<Value<'src>>,
@@ -73,20 +89,21 @@ fn match_patt<'src>(
             name,
             value: Rc::clone(value),
         }]),
+        (Patt::Tuple(patterns), Value::Tuple(elements)) => {
+            match_fields(patterns, elements.iter(), env)
+        }
         (Patt::Struct(patt), Value::Struct(value)) => {
             let Value::Closure(closure) = env.get(patt.name)?.as_ref() else {
                 return None;
             };
-            if value.ctor != closure.definition().id || patt.args.value.len() != value.args.len() {
+            if value.ctor != closure.definition().id {
                 return None;
             }
-
-            let mut bindings = vec![];
-            for (arg_patt, arg) in patt.args.value.iter().zip(value.args.iter()) {
-                bindings.extend(match_patt(&arg_patt.value, &arg.value, env)?);
-            }
-
-            Some(bindings)
+            match_fields(
+                &patt.args.value,
+                value.args.iter().map(|arg| &arg.value),
+                env,
+            )
         }
         _ => None,
     }
@@ -167,6 +184,12 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 msg: format!("Variable `{x}` not found"),
                 span: expr.span,
             })?,
+        Expr::Tuple(elements) => Value::Tuple(
+            elements
+                .iter()
+                .map(|element| eval(element, env.clone()).map(Rc::new))
+                .collect::<Result<_, _>>()?,
+        ),
         Expr::Call(Call { callee, args }) => match eval(callee, env.clone())? {
             Value::Closure(closure) => Value::Struct(prepare_closure_call(
                 &closure,

@@ -73,6 +73,11 @@ pub fn with_span<'src>(mut body: Rc<Spanned<Expr<'src>>>, span: Span) -> Rc<Span
     fn set_expr_span(expr: &mut Spanned<Expr<'_>>, span: Span) {
         expr.span = span;
         match &mut expr.value {
+            Expr::Tuple(elements) => {
+                for element in elements {
+                    set_expr_span(element, span);
+                }
+            }
             Expr::Call(Call { callee, args }) => {
                 set_expr_span(callee, span);
                 args.span = span;
@@ -117,6 +122,11 @@ pub fn with_span<'src>(mut body: Rc<Spanned<Expr<'src>>>, span: Span) -> Rc<Span
     fn set_patt_span(patt: &mut Spanned<Patt<'_>>, span: Span) {
         patt.span = span;
         match &mut patt.value {
+            Patt::Tuple(elements) => {
+                for element in elements {
+                    set_patt_span(element, span);
+                }
+            }
             Patt::Struct(StructPatt { args, .. }) => {
                 args.span = span;
                 for arg in &mut args.value {
@@ -600,7 +610,10 @@ mod tests {
             }));
             let pair = patt(Patt::Struct(StructPatt {
                 name: "pair",
-                args: Spanned::new(vec![patt(Patt::Var("head")), tail], span),
+                args: Spanned::new(
+                    vec![patt(Patt::Tuple(vec![patt(Patt::Var("head"))])), tail],
+                    span,
+                ),
             }));
             let sum = Spanned::new(op(var("y"), var("+"), var("head")), span);
             let case = Spanned::new(
@@ -629,7 +642,8 @@ mod tests {
                 span,
             );
             let force = Spanned::new(Expr::Eval(Box::new(apply)), span);
-            Spanned::new(binding("combine", function, force), span)
+            let tuple = Spanned::new(Expr::Tuple(vec![force]), span);
+            Spanned::new(binding("combine", function, tuple), span)
         }
         let mut original = body((50..60).into());
         original.span = (0..0).into();

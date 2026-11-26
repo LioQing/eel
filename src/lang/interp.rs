@@ -109,9 +109,25 @@ fn match_patt<'src>(
     }
 }
 
+fn validate_operator_arity(name: Option<&str>, arity: usize, span: Span) -> Result<(), Error> {
+    if arity == 2 {
+        return Ok(());
+    }
+
+    Err(Error {
+        msg: format!(
+            "Expected an operator, which is a function with exactly 2 parameters, but {} has {arity}",
+            name.map(|n| format!("`{n}`"))
+                .unwrap_or_else(|| "<anonymous>".to_string())
+        ),
+        span,
+    })
+}
+
 /// Evaluates the expression in the old environment and installs it on success.
 pub fn bind<'src>(
     x: &'src str,
+    fixity: Option<Fixity>,
     expr: &Spanned<Expr<'src>>,
     env: &mut Env<'src>,
 ) -> Result<(), Error> {
@@ -139,12 +155,38 @@ pub fn bind<'src>(
         }
     };
 
+    if fixity.is_some() {
+        let Value::Closure(closure) = &v else {
+            return Err(Error {
+                msg: format!(
+                    "Expected an operator, which is a function with exactly 2 parameters, but got {v}"
+                ),
+                span: expr.span,
+            });
+        };
+
+        validate_operator_arity(Some(x), closure.definition().params.len(), expr.span)?;
+    }
+
     env.insert_mut(x, Rc::new(v));
     Ok(())
 }
 
 /// Evaluates the expression in the old environment and installs it on success.
-pub fn bind_rec_group<'src>(members: &[RecFn<'src, Rc<Spanned<Expr<'src>>>>], env: &mut Env<'src>) {
+pub fn bind_rec_group<'src>(
+    members: &[RecFn<'src, Rc<Spanned<Expr<'src>>>>],
+    env: &mut Env<'src>,
+) -> Result<(), Error> {
+    for member in members {
+        if member.fixity.is_some() {
+            validate_operator_arity(
+                Some(member.name.value),
+                member.params.value.len(),
+                member.params.span,
+            )?;
+        }
+    }
+
     let group = Rc::new(ClosureGroup {
         env: env.clone(),
         members: members
@@ -159,6 +201,7 @@ pub fn bind_rec_group<'src>(members: &[RecFn<'src, Rc<Spanned<Expr<'src>>>>], en
     });
 
     insert_recursive_bindings(env, &group);
+    Ok(())
 }
 
 /// Applies and evaluates a unary closure using an already evaluated argument.
@@ -259,17 +302,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
             Value::Closure(closure) => {
                 let name = closure.name;
                 let ClosureDef { params, body, .. } = closure.definition();
-                if params.len() != 2 {
-                    return Err(Error {
-                        msg: format!(
-                            "Expected 2 parameters for operator {}, but got {}",
-                            name.map(|n| format!("`{n}`"))
-                                .unwrap_or_else(|| "<anonymous>".to_string()),
-                            params.len(),
-                        ),
-                        span: op.span,
-                    });
-                }
+                validate_operator_arity(name, params.len(), op.span)?;
 
                 let body = builtin::with_span(Rc::clone(body), op.span);
 
@@ -302,15 +335,18 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
             }
         },
         Expr::Let(Let {
-            name, init, body, ..
+            name,
+            fixity,
+            init,
+            body,
         }) => {
             let mut new_env = env;
-            bind(name, init, &mut new_env)?;
+            bind(name, *fixity, init, &mut new_env)?;
             eval(body, new_env)?
         }
         Expr::LetRec(LetRec { bindings, body }) => {
             let mut new_env = env;
-            bind_rec_group(bindings, &mut new_env);
+            bind_rec_group(bindings, &mut new_env)?;
             eval(body, new_env)?
         }
         Expr::Builtin(f) => f(expr, &env)?,
@@ -435,7 +471,7 @@ mod tests {
                 unreachable!()
             };
             f.params.span = (index..index + 1).into();
-            bind(name, &expr, &mut env).unwrap();
+            bind(name, None, &expr, &mut env).unwrap();
         }
         env
     }
@@ -482,7 +518,7 @@ mod tests {
     fn test_bind_preserves_previous_binding_when_expression_fails() {
         let mut env = env_from([("x", Value::Int(42))]);
 
-        assert!(bind("x", &var("missing"), &mut env).is_err());
+        assert!(bind("x", None, &var("missing"), &mut env).is_err());
         assert_eval(var("x"), env, Value::Int(42));
     }
 
@@ -1054,7 +1090,7 @@ mod tests {
             },
         ];
         let mut env = env_from([("base", Value::Int(42))]);
-        bind_rec_group(&members, &mut env);
+        bind_rec_group(&members, &mut env).unwrap();
         let Value::Closure(first) = env.get("first").unwrap().as_ref() else {
             panic!("expected a group member");
         };

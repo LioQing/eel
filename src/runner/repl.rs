@@ -172,14 +172,15 @@ impl<'src> Session<'src> {
             }
             ReplItem::Let(LetBinding { fixity, name, init }) => {
                 let (expr, specs) = fixity::resolve_let(name, fixity, init, &self.specs);
-                interp::bind(name, &expr, &mut self.env)
+                interp::bind(name, fixity, &expr, &mut self.env)
                     .map_err(|error| SubmitError::Diagnostics(vec![error.into()]))?;
                 self.specs = specs;
                 Ok(None)
             }
             ReplItem::LetRec(members) => {
                 let (members, specs) = fixity::resolve_let_rec(members, &self.specs);
-                interp::bind_rec_group(&members, &mut self.env);
+                interp::bind_rec_group(&members, &mut self.env)
+                    .map_err(|error| SubmitError::Diagnostics(vec![error.into()]))?;
                 self.specs = specs;
                 Ok(None)
             }

@@ -252,10 +252,34 @@ fn test_expressions_use_previous_binding_fixity() {
         ),
         (
             "let opl 1 sub = fn(a, b) { a - b }
-          let opr 1 sub = { 10 sub 3 sub 2 } sub",
+          let opr 1 sub = { let n = { 10 sub 3 sub 2 } fn(a, b) { n } } 0 sub 0",
             5,
         ),
     ] {
         assert_returned(src, expected);
+    }
+}
+
+#[test]
+fn test_infix_operator_requirements() {
+    for (src, message) in [
+        (
+            "let opl 1 op = 42 0",
+            "Expected an operator, which is a function with exactly 2 parameters, but got 42",
+        ),
+        (
+            "let f = fn(x) { x } let opr 1 op = f 0",
+            "Expected an operator, which is a function with exactly 2 parameters, but `op` has 1",
+        ),
+        (
+            "let { opl 1 op = fn() { 0 } } 0",
+            "Expected an operator, which is a function with exactly 2 parameters, but `op` has 0",
+        ),
+        (
+            "let f = fn(a, b, c) { a } 1 f 2",
+            "Expected an operator, which is a function with exactly 2 parameters, but `f` has 3",
+        ),
+    ] {
+        assert_failure(&SourceFile::new(src).run(), message);
     }
 }

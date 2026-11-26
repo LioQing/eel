@@ -87,7 +87,7 @@ pub fn with_span<'src>(mut body: Rc<Spanned<Expr<'src>>>, span: Span) -> Rc<Span
             }
             Expr::Eval(operand) => set_expr_span(operand, span),
             Expr::Fn(FnExpr { params, body }) => {
-                params.span = span;
+                set_param_spans(params, span);
                 set_expr_span(Rc::make_mut(body), span);
             }
             Expr::Case(Case { scrutinee, arms }) => {
@@ -103,19 +103,27 @@ pub fn with_span<'src>(mut body: Rc<Spanned<Expr<'src>>>, span: Span) -> Rc<Span
                 set_expr_span(op, span);
                 set_expr_span(rhs, span);
             }
-            Expr::Let(Let { init, body, .. }) => {
+            Expr::Let(Let { patt, init, body }) => {
+                set_patt_span(patt, span);
                 set_expr_span(init, span);
                 set_expr_span(body, span);
             }
             Expr::LetRec(LetRec { bindings, body }) => {
                 for binding in bindings {
                     binding.binder.span = span;
-                    binding.params.span = span;
+                    set_param_spans(&mut binding.params, span);
                     set_expr_span(Rc::make_mut(&mut binding.body), span);
                 }
                 set_expr_span(body, span);
             }
             Expr::Err | Expr::Lit(_) | Expr::Var(_) | Expr::Builtin(_) => {}
+        }
+    }
+
+    fn set_param_spans(params: &mut Params<'_>, span: Span) {
+        params.span = span;
+        for patt in &mut params.value {
+            set_patt_span(patt, span);
         }
     }
 
@@ -147,11 +155,23 @@ pub fn with_span<'src>(mut body: Rc<Spanned<Expr<'src>>>, span: Span) -> Rc<Span
 }
 
 pub fn env<'src>() -> Env<'src> {
-    fn data<'src>(name: &'static str, body_span: Span, args: StructArgs<'src>) -> Value<'src> {
-        let applied_env = args
+    fn data<'src, const N: usize>(
+        name: &'static str,
+        body_span: Span,
+        fields: [Binding<'src>; N],
+    ) -> Value<'src> {
+        let applied_env = fields
             .iter()
             .map(|arg| (arg.name, Rc::clone(&arg.value)))
             .collect();
+
+        let args = fields
+            .map(|Binding { name, value }| StructArg {
+                name: Some(name),
+                value,
+            })
+            .into();
+
         Value::Struct(Struct {
             ctor: DefinitionId::Builtin(name),
             name: Some(name),
@@ -168,19 +188,19 @@ pub fn env<'src>() -> Env<'src> {
     let print_plan = builtin!("Print" expr env [value] => Ok(Value::Unit));
     let eprint_plan = builtin!("Eprint" expr env [value] => Ok(Value::Unit));
     let bind_plan = builtin!("IoBind" expr env [plan, next] => Ok(Value::Unit));
-    let ret = builtin!("io_return" expr env [value] => Ok(data("IoReturn", expr.span, Rc::from([
+    let ret = builtin!("io_return" expr env [value] => Ok(data("IoReturn", expr.span, [
         Binding { name: "value", value: Rc::new(value.clone()) },
-    ]))));
-    let print = builtin!("print" expr env [value] => Ok(data("Print", expr.span, Rc::from([
+    ])));
+    let print = builtin!("print" expr env [value] => Ok(data("Print", expr.span, [
         Binding { name: "value", value: Rc::new(value.clone()) },
-    ]))));
-    let eprint = builtin!("eprint" expr env [value] => Ok(data("Eprint", expr.span, Rc::from([
+    ])));
+    let eprint = builtin!("eprint" expr env [value] => Ok(data("Eprint", expr.span, [
         Binding { name: "value", value: Rc::new(value.clone()) },
-    ]))));
-    let bind = builtin!("io_bind" expr env [plan, next] => Ok(data("IoBind", expr.span, Rc::from([
+    ])));
+    let bind = builtin!("io_bind" expr env [plan, next] => Ok(data("IoBind", expr.span, [
         Binding { name: "plan", value: Rc::new(plan.clone()) },
         Binding { name: "next", value: Rc::new(next.clone()) },
-    ]))));
+    ])));
     let add = builtin!("+" expr env [a, b] => {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => a.checked_add(*b)
@@ -323,7 +343,7 @@ pub fn env<'src>() -> Env<'src> {
         data(
             "Monad",
             (0..0).into(),
-            Rc::from([
+            [
                 Binding {
                     name: "bind",
                     value: Rc::new(bind.1.clone()),
@@ -332,9 +352,10 @@ pub fn env<'src>() -> Env<'src> {
                     name: "ret",
                     value: Rc::new(ret.1.clone()),
                 },
-            ]),
+            ],
         ),
     );
+
     [
         monad,
         io,
@@ -412,7 +433,7 @@ mod tests {
         body: Spanned<Expr<'src>>,
     ) -> Expr<'src> {
         Expr::Let(Let {
-            binder: name.into(),
+            patt: Box::new(Spanned::new(Patt::Var(name.into()), init.span)),
             init: Box::new(init),
             body: Box::new(body),
         })
@@ -420,7 +441,14 @@ mod tests {
 
     fn function<'src>(params: Spanned<Vec<&'src str>>, body: Spanned<Expr<'src>>) -> Expr<'src> {
         Expr::Fn(FnExpr {
-            params: params.map(|ps| ps.into_iter().map(Binder::from).collect()),
+            params: {
+                let span = params.span;
+                params.map(|ps| {
+                    ps.into_iter()
+                        .map(|p| Spanned::new(Patt::Var(p.into()), span))
+                        .collect()
+                })
+            },
             body: Rc::new(body),
         })
     }
@@ -459,7 +487,7 @@ mod tests {
                     members: Box::new([ClosureDef {
                         id: DefinitionId::Builtin(name),
                         rec_name: None,
-                        params: params.into_iter().map(Binder::from).collect(),
+                        params: params.into_iter().map(Into::into).collect(),
                         body: Rc::new(Spanned::new(body.value, 0..0)),
                     }]),
                 }),
@@ -1016,18 +1044,18 @@ mod tests {
             member: 0,
         });
         let args: StructArgs<'_> = Rc::from([
-            Binding {
-                name: "a",
+            StructArg {
+                name: Some("a"),
                 value: Rc::new(Value::Int(1)),
             },
-            Binding {
-                name: "b",
+            StructArg {
+                name: Some("b"),
                 value: Rc::new(Value::Int(2)),
             },
         ]);
         let applied_env = args
             .iter()
-            .map(|arg| (arg.name, Rc::clone(&arg.value)))
+            .map(|arg| (arg.name.unwrap(), Rc::clone(&arg.value)))
             .collect();
         let deferred = Value::Struct(Struct {
             ctor: DefinitionId::Builtin("+"),
@@ -1079,7 +1107,7 @@ mod tests {
             assert!(
                 matches!(result, Ok(Value::Struct(Struct { name: Some("!="), ref args, .. }))
                     if args.iter().map(|arg| (arg.name, arg.value.as_ref()))
-                        .eq([("a", &Value::Int(1)), ("b", &value)])),
+                        .eq([(Some("a"), &Value::Int(1)), (Some("b"), &value)])),
                 "{expr:?}: {result:?}"
             );
         }

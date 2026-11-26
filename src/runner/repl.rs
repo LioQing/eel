@@ -18,7 +18,7 @@ use super::{
 };
 
 const HELP: &str = "\
-Enter an expression to evaluate it, `let name = expression` to define a binding, 
+Enter an expression to evaluate it, `let pattern = expression` to bind the matched names,
 `let { foo = fn(...) ... bar = fn(...) ... }` to define a recursive function group.
 :help       Show this help
 :quit, :q   Exit the REPL
@@ -170,9 +170,9 @@ impl<'src> Session<'src> {
                 self.specs.retain(|spec| spec.name != "it");
                 Ok(Some(value))
             }
-            ReplItem::Let(LetBinding { binder, init }) => {
-                let (expr, specs) = fixity::resolve_let(binder, init, &self.specs);
-                interp::bind(binder, &expr, &mut self.env)
+            ReplItem::Let(LetBinding { patt, init }) => {
+                let (expr, specs) = fixity::resolve_let(&patt.value, init, &self.specs);
+                interp::bind(&patt, &expr, &mut self.env)
                     .map_err(|error| SubmitError::Diagnostics(vec![error.into()]))?;
                 self.specs = specs;
                 Ok(None)
@@ -289,6 +289,23 @@ mod tests {
         assert_result(&mut session, "10 sub 3 sub 2", 9);
         assert!(submit(&mut session, "let sub = -").unwrap().is_none());
         assert_result(&mut session, "10 sub 3 sub 2", 5);
+    }
+
+    #[test]
+    fn test_repl_pattern_bindings_commit_together() {
+        let arena = Arena::new();
+        let mut session = Session::new(&arena);
+        assert_result(&mut session, "42", 42);
+        submit(&mut session, "let (x, opr 1 sub) = (20, -)").unwrap();
+        for input in [
+            "let (x, sub, fresh, 0) = (1, +, 2, 1)",
+            "let (x, sub, fresh, opr 1 bad) = (1, +, 2, 0)",
+        ] {
+            expect_diagnostics(&mut session, input);
+        }
+        expect_diagnostics(&mut session, "fresh");
+        assert_result(&mut session, "it", 42);
+        assert_result(&mut session, "x sub 3 sub 2", 19);
     }
 
     #[test]

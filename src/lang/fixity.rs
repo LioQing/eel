@@ -55,26 +55,28 @@ fn shadow_patt<'src>(patt: &Patt<'src>, specs: &mut Vec<OpSpec<'src>>) {
 }
 
 fn resolve_fn_body<'src>(
-    params: &[Binder<'src>],
+    params: &[Spanned<Patt<'src>>],
     body: Spanned<SyntaxExpr<'src>>,
     specs: &[OpSpec<'src>],
 ) -> Rc<Spanned<Expr<'src>>> {
     let mut scoped_specs = specs.to_vec();
-    scoped_specs.extend(params.iter().copied().map(OpSpec::from));
+    for param in params {
+        shadow_patt(&param.value, &mut scoped_specs);
+    }
     Rc::new(resolve(body, &scoped_specs))
 }
 
 /// Resolves the expression and returns the fixities in scope after the binding.
 pub fn resolve_let<'src>(
-    binder: Binder<'src>,
+    patt: &Patt<'src>,
     expr: Spanned<SyntaxExpr<'src>>,
     specs: &[OpSpec<'src>],
 ) -> (Spanned<Expr<'src>>, Vec<OpSpec<'src>>) {
     let mut scoped_specs = specs.to_vec();
-    scoped_specs.push(binder.into());
+    shadow_patt(patt, &mut scoped_specs);
 
     // Only a function definition sees the new binding from its expression.
-    let expr_specs = if matches!(&expr.value, SyntaxExpr::Fn(_)) {
+    let expr_specs = if matches!((patt, &expr.value), (Patt::Var(_), SyntaxExpr::Fn(_))) {
         scoped_specs.as_slice()
     } else {
         specs
@@ -121,12 +123,13 @@ pub fn resolve<'src>(
                 .collect(),
         ),
         SyntaxExpr::LetBind(LetBind {
-            name,
+            patt,
             arrow,
             action,
             body,
         }) => {
-            let params = name.map(|name| vec![name]);
+            let patt_span = patt.span;
+            let params = Spanned::new(vec![*patt], patt_span);
             let body = resolve_fn_body(&params.value, *body, specs);
             let fn_span = params.span.start..body.span.end;
             Expr::Op(Op {
@@ -179,10 +182,10 @@ pub fn resolve<'src>(
             }
             operands.pop().unwrap().value
         }
-        SyntaxExpr::Let(Let { binder, init, body }) => {
-            let (init, scoped_specs) = resolve_let(binder, *init, specs);
+        SyntaxExpr::Let(Let { patt, init, body }) => {
+            let (init, scoped_specs) = resolve_let(&patt.value, *init, specs);
             Expr::Let(Let {
-                binder,
+                patt,
                 init: Box::new(init),
                 body: Box::new(resolve(*body, &scoped_specs)),
             })
@@ -244,7 +247,7 @@ mod tests {
         body: Spanned<Expr<'src>>,
     ) -> Spanned<Expr<'src>> {
         spanned(Expr::Let(Let {
-            binder: Binder { name, fixity },
+            patt: Box::new(spanned(Patt::Var(Binder { name, fixity }))),
             init: Box::new(assign),
             body: Box::new(body),
         }))
@@ -252,7 +255,7 @@ mod tests {
 
     fn function<'src>(params: Vec<&'src str>, body: Spanned<Expr<'src>>) -> Spanned<Expr<'src>> {
         spanned(Expr::Fn(FnExpr {
-            params: spanned(params.into_iter().map(Binder::from).collect()),
+            params: spanned(params.into_iter().map(Into::into).collect()),
             body: Rc::new(body),
         }))
     }
@@ -315,7 +318,7 @@ mod tests {
         body: Spanned<SyntaxExpr<'src>>,
     ) -> Spanned<SyntaxExpr<'src>> {
         spanned(SyntaxExpr::Let(Let {
-            binder: Binder { name, fixity },
+            patt: Box::new(spanned(Patt::Var(Binder { name, fixity }))),
             init: Box::new(assign),
             body: Box::new(body),
         }))
@@ -326,7 +329,7 @@ mod tests {
         body: Spanned<SyntaxExpr<'src>>,
     ) -> Spanned<SyntaxExpr<'src>> {
         spanned(SyntaxExpr::Fn(FnExpr {
-            params: spanned(params.into_iter().map(Binder::from).collect()),
+            params: spanned(params.into_iter().map(Into::into).collect()),
             body: Box::new(body),
         }))
     }
@@ -1184,7 +1187,7 @@ mod tests {
                     name,
                     fixity: if name == "sub" { fixity } else { None },
                 }),
-                params: spanned(params.into_iter().map(Binder::from).collect()),
+                params: spanned(params.into_iter().map(Into::into).collect()),
                 body: sub_chain(),
             })
             .collect();

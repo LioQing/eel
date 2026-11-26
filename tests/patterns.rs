@@ -1,6 +1,66 @@
 mod common;
 
-use common::assert_returned;
+use common::{SourceFile, assert_failure, assert_returned};
+
+#[test]
+fn test_let_destructures_against_outer_constructor_without_forcing() {
+    assert_returned(
+        "let Box = fn(x) { missing }
+         let Alias = Box
+         let (Alias, Alias((x, (), 7))) = (20, Box((22, unit, 7)))
+         Alias + x",
+        42,
+    );
+}
+
+#[test]
+fn test_let_pattern_requires_a_complete_match() {
+    for source in [
+        "let (x, y) = (42,) missing",
+        "let (x, 0) = (42, 1) missing",
+        "let Box = fn(x) x let old = Box(42) let Box = fn(x) x let Box(y) = old missing",
+    ] {
+        assert_failure(&SourceFile::new(source).run(), "did not match value");
+    }
+}
+
+#[test]
+fn test_parameter_patterns_match_at_application_and_keep_positional_args() {
+    assert_failure(
+        &SourceFile::new("let f = fn((x, y)) missing let unused = f(0) 42").run(),
+        "Pattern (x, y) did not match value 0",
+    );
+    assert_returned(
+        "let f = fn((x, y), 7) missing
+         let f((a, b), tag) = f((20, 15), 7)
+         a + b + tag",
+        42,
+    );
+}
+
+#[test]
+fn test_parameter_constructor_lookup_uses_definition_scope() {
+    assert_returned(
+        "let Box = fn(x) missing
+         let old = Box(22)
+         let f = fn(Box, Box(x)) { Box + x }
+         let Box = fn(x) missing
+         f(20, old).",
+        42,
+    );
+}
+
+#[test]
+fn test_recursive_member_patterns_use_peers_and_nested_operator_fixity() {
+    assert_returned(
+        "let {
+            apply = fn(Tag((opr 1 sub, n))) { n sub 3 sub 2 }
+            Tag = fn(x) missing
+         }
+         apply(Tag((-, 10))).",
+        9,
+    );
+}
 
 #[test]
 fn test_struct_pattern_rejects_too_few_args() {

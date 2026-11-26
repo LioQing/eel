@@ -80,6 +80,23 @@ case point {
 ```
 
 Tuple patterns match by position and require the same number of elements.
+You can use any `case` pattern on the left of `let`, including in standalone
+REPL declarations:
+
+```text
+let (x, (y,)) = (20, (22,))
+x + y
+// 42
+```
+
+If the value doesn't match, Eel reports a runtime error at the pattern.
+None of the names or operator declarations from a failed match take effect.
+
+Function parameters use the same patterns. `fn((x, y)) { x + y }` takes one
+pair, while `fn(x, y) { x + y }` takes two arguments. Arguments must match
+when the function is applied, even if you never force its body with `.`.
+The resulting struct still stores the original arguments by position.
+
 As with calls elsewhere in Eel, whitespace before `(` does not separate
 expressions. If a tuple starts the body of a `let`, use a block, as in
 `let x = 1 { (x,) }`. In a `case`, a tuple pattern following an arm body
@@ -106,13 +123,9 @@ The builtin `Monad` constructor pairs a binary `bind` function with a unary
 `return` function. Match the pair to use both operations in the same scope:
 
 ```text
-let increment = fn(ops, action) {
-    case (ops) {
-        Monad(bind, return) => {
-            let x <- action
-            return(x + 1).
-        }
-    }
+let increment = fn(Monad(bind, return), action) {
+    let x <- action
+    return(x + 1).
 }
 
 let Identity = Monad(fn(x, next) next(x)., fn(x) x)
@@ -162,6 +175,10 @@ Io(case IoMonad {
 in scope. A user-defined `bind` works the same way. As with `let x = ...`,
 parenthesize an infix expression on the right of `<-`. Use `_` when you
 don't need the result.
+
+For example, `let (x, y) <- action rest` means
+`action bind fn((x, y)) { rest }`. If `bind` skips the continuation,
+no match is attempted.
 
 The runner recognizes the built-in plan constructors `IoReturn`, `Print`, `Eprint`,
 and `IoBind`, even through aliases. It also accepts user-defined structs with

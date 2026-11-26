@@ -59,6 +59,25 @@ fn test_let_bind_uses_local_operator_and_defers_body() {
 }
 
 #[test]
+fn test_bind_destructures_the_result_with_pattern_fixity() {
+    let file = SourceFile::new(
+        "let Monad(bind, return) = IoMonad
+         Io(let (x, opr 1 sub) <- return((10, -)).
+            return(x sub 3 sub 2).)",
+    );
+    assert_exit(&file.run(), 9, "", "");
+}
+
+#[test]
+fn test_bind_pattern_mismatch_only_errors_when_continuation_runs() {
+    let source = "let (x,) <- 0 missing";
+    let skip = SourceFile::new(format!("let bind = fn(a, next) 42 {source}"));
+    assert_exit(&skip.run(), 42, "", "");
+    let run = SourceFile::new(format!("let bind = fn(a, next) next(a). {source}"));
+    assert_failure(&run.run(), "did not match value 0");
+}
+
+#[test]
 fn test_requested_io_expression() {
     let output = SourceFile::new("Io((fn(n) { io_return(n + 1). })(5). io_bind print)").run();
     assert_success(&output, "6\n", "");

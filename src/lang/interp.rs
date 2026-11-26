@@ -43,15 +43,28 @@ fn prepare_closure_call<'src>(
     }
 
     let body = builtin::with_span(Rc::clone(body), callee_span);
-    let args: StructArgs<'src> = params
-        .iter()
-        .zip(args)
-        .map(|(&binder, arg)| validated_binding(binder, arg?, call_span))
-        .collect::<Result<_, _>>()?;
-
     let mut applied_env = closure.group.env.clone();
     insert_recursive_bindings(&mut applied_env, &closure.group);
-    insert_bindings(&mut applied_env, args.iter().cloned());
+
+    // Every constructor in the parameter list refers to the definition scope,
+    // even when an earlier parameter binds the same name.
+    let pattern_env = applied_env.clone();
+
+    let args = params
+        .iter()
+        .zip(args)
+        .map(|(patt, arg)| {
+            let value = arg?;
+            insert_bindings(&mut applied_env, require_match(patt, &value, &pattern_env)?);
+
+            let name = match patt.value {
+                Patt::Var(binder) => Some(binder.name),
+                _ => None,
+            };
+
+            Ok(StructArg { name, value })
+        })
+        .collect::<Result<_, Error>>()?;
 
     Ok(Struct {
         ctor: closure.definition().id,
@@ -129,6 +142,17 @@ fn validate_operator_arity(name: Option<&str>, arity: usize, span: Span) -> Resu
     })
 }
 
+fn require_match<'src>(
+    patt: &Spanned<Patt<'src>>,
+    value: &Rc<Value<'src>>,
+    env: &Env<'src>,
+) -> Result<Bindings<'src>, Error> {
+    match_patt(patt, value, env).ok_or_else(|| Error {
+        msg: format!("Pattern {} did not match value {value}", patt.value),
+        span: patt.span,
+    })?
+}
+
 fn validated_binding<'src>(
     binder: Binder<'src>,
     value: Rc<Value<'src>>,
@@ -153,12 +177,20 @@ fn validated_binding<'src>(
     })
 }
 
-/// Evaluates the expression in the old environment and installs it on success.
+/// Matches the initializer in the old environment, installing bindings only on success.
 pub fn bind<'src>(
-    binder: Binder<'src>,
+    patt: &Spanned<Patt<'src>>,
     expr: &Spanned<Expr<'src>>,
     env: &mut Env<'src>,
 ) -> Result<(), Error> {
+    let Patt::Var(binder) = patt.value else {
+        let value = Rc::new(eval(expr, env.clone())?);
+        let bindings = require_match(patt, &value, env)?;
+        insert_bindings(env, bindings);
+        return Ok(());
+    };
+
+    // A simple name can introduce a recursive function definition or a named alias.
     let v = match &expr.value {
         Expr::Fn(FnExpr { params, body }) => Value::Closure(Closure {
             name: Some(binder.name),
@@ -232,6 +264,7 @@ pub fn eval_unary_closure<'src>(
     eval(&applied.body, applied.applied_env)
 }
 
+/// Evaluates the expression in the given environment and returns the resulting value.
 pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'src>, Error> {
     Ok(match &expr.value {
         Expr::Err => unreachable!(), // Valid AST does not contain Expr::Err
@@ -338,9 +371,9 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 });
             }
         },
-        Expr::Let(Let { binder, init, body }) => {
+        Expr::Let(Let { patt, init, body }) => {
             let mut new_env = env;
-            bind(*binder, init, &mut new_env)?;
+            bind(patt, init, &mut new_env)?;
             eval(body, new_env)?
         }
         Expr::LetRec(LetRec { bindings, body }) => {
@@ -391,7 +424,7 @@ mod tests {
 
     fn function<'src>(params: Vec<&'src str>, body: Spanned<Expr<'src>>) -> Spanned<Expr<'src>> {
         spanned(Expr::Fn(FnExpr {
-            params: spanned(params.into_iter().map(Binder::from).collect()),
+            params: spanned(params.into_iter().map(Into::into).collect()),
             body: Rc::new(body),
         }))
     }
@@ -416,7 +449,7 @@ mod tests {
         body: Spanned<Expr<'src>>,
     ) -> Spanned<Expr<'src>> {
         spanned(Expr::Let(Let {
-            binder: name.into(),
+            patt: Box::new(spanned(Patt::Var(name.into()))),
             init: Box::new(assign),
             body: Box::new(body),
         }))
@@ -469,7 +502,7 @@ mod tests {
                 unreachable!()
             };
             f.params.span = (index..index + 1).into();
-            bind(name.into(), &expr, &mut env).unwrap();
+            bind(&spanned(Patt::Var(name.into())), &expr, &mut env).unwrap();
         }
         env
     }
@@ -516,7 +549,7 @@ mod tests {
     fn test_bind_preserves_previous_binding_when_expression_fails() {
         let mut env = env_from([("x", Value::Int(42))]);
 
-        assert!(bind("x".into(), &var("missing"), &mut env).is_err());
+        assert!(bind(&spanned(Patt::Var("x".into())), &var("missing"), &mut env).is_err());
         assert_eval(var("x"), env, Value::Int(42));
     }
 
@@ -581,8 +614,8 @@ mod tests {
                 ctor: DefinitionId::Source((0..0).into()),
                 name: Some("id"),
                 body: Rc::clone(&body),
-                args: Rc::from([Binding {
-                    name: "y",
+                args: Rc::from([StructArg {
+                    name: Some("y"),
                     value: Rc::new(Value::Int(42))
                 }]),
                 applied_env: env_from([("id", id), ("y", Value::Int(42))]),
@@ -614,8 +647,8 @@ mod tests {
                     ctor: DefinitionId::Source((0..0).into()),
                     name: Some("x_struct"),
                     body: Rc::new(var("x")),
-                    args: Rc::from([Binding {
-                        name: "x",
+                    args: Rc::from([StructArg {
+                        name: Some("x"),
                         value: x_arg,
                     }]),
                     applied_env,

@@ -191,7 +191,7 @@ mod parse {
                     .params
                     .value
                     .iter()
-                    .map(ToString::to_string)
+                    .map(|p| p.value.to_string())
                     .collect::<Vec<_>>()
                     .join(", "),
                 binding.body.value,
@@ -200,10 +200,12 @@ mod parse {
         write!(f, " }}")
     }
 
+    pub type Params<'src> = Spanned<Vec<Spanned<Patt<'src>>>>;
+
     #[derive(Debug, Clone, PartialEq)]
     pub struct RecFn<'src, Body> {
         pub binder: Spanned<Binder<'src>>,
-        pub params: Spanned<Vec<Binder<'src>>>,
+        pub params: Params<'src>,
         pub body: Body,
     }
 
@@ -229,7 +231,7 @@ mod parse {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct FnExpr<'src, Body> {
-        pub params: Spanned<Vec<Binder<'src>>>,
+        pub params: Params<'src>,
         pub body: Body,
     }
 
@@ -265,14 +267,14 @@ mod parse {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct Let<'src, E> {
-        pub binder: Binder<'src>,
+        pub patt: Box<Spanned<Patt<'src>>>,
         pub init: Box<Spanned<E>>,
         pub body: Box<Spanned<E>>,
     }
 
     impl<E: SpanlessPartialEq> SpanlessPartialEq for Let<'_, E> {
         fn spanless_eq(&self, other: &Self) -> bool {
-            self.binder == other.binder
+            self.patt.spanless_eq(&other.patt)
                 && self.init.spanless_eq(&other.init)
                 && self.body.spanless_eq(&other.body)
         }
@@ -292,13 +294,13 @@ mod parse {
 
     #[derive(Debug)]
     pub struct LetBinding<'src> {
-        pub binder: Binder<'src>,
+        pub patt: Spanned<Patt<'src>>,
         pub init: Spanned<SyntaxExpr<'src>>,
     }
 
     impl SpanlessPartialEq for LetBinding<'_> {
         fn spanless_eq(&self, other: &Self) -> bool {
-            self.binder == other.binder && self.init.spanless_eq(&other.init)
+            self.patt.spanless_eq(&other.patt) && self.init.spanless_eq(&other.init)
         }
     }
 
@@ -337,8 +339,8 @@ mod parse {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 Self::Expr(expr) => write!(f, "{}", expr.value),
-                Self::Let(LetBinding { binder, init }) => {
-                    write!(f, "let {binder} = {}", init.value)
+                Self::Let(LetBinding { patt, init }) => {
+                    write!(f, "let {} = {}", patt.value, init.value)
                 }
                 Self::LetRec(bindings) => fmt_let_rec(f, bindings),
             }
@@ -358,7 +360,7 @@ mod parse {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct LetBind<'src> {
-        pub name: Spanned<Binder<'src>>,
+        pub patt: Box<Spanned<Patt<'src>>>,
         pub arrow: Span,
         pub action: Box<Spanned<SyntaxExpr<'src>>>,
         pub body: Box<Spanned<SyntaxExpr<'src>>>,
@@ -366,7 +368,7 @@ mod parse {
 
     impl SpanlessPartialEq for LetBind<'_> {
         fn spanless_eq(&self, other: &Self) -> bool {
-            self.name.value == other.name.value
+            self.patt.spanless_eq(&other.patt)
                 && self.action.spanless_eq(&other.action)
                 && self.body.spanless_eq(&other.body)
         }
@@ -409,7 +411,7 @@ mod parse {
                         params
                             .value
                             .iter()
-                            .map(|p| p.to_string())
+                            .map(|p| p.value.to_string())
                             .collect::<Vec<_>>()
                             .join(", "),
                         body.value,
@@ -440,10 +442,10 @@ mod parse {
                 SyntaxExpr::LetBind(b) => write!(
                     f,
                     "let {} <- {} {}",
-                    b.name.value, b.action.value, b.body.value
+                    b.patt.value, b.action.value, b.body.value
                 ),
-                SyntaxExpr::Let(Let { binder, init, body }) => {
-                    write!(f, "let {binder} = {} {}", init.value, body.value)
+                SyntaxExpr::Let(Let { patt, init, body }) => {
+                    write!(f, "let {} = {} {}", patt.value, init.value, body.value)
                 }
                 SyntaxExpr::LetRec(LetRec { bindings, body }) => {
                     fmt_let_rec(f, bindings)?;
@@ -541,7 +543,7 @@ mod fixity {
     pub struct ClosureDef<'src> {
         pub id: DefinitionId<'src>,
         pub rec_name: Option<&'src str>,
-        pub params: Vec<Binder<'src>>,
+        pub params: Vec<Spanned<Patt<'src>>>,
         pub body: Rc<Spanned<Expr<'src>>>,
     }
 
@@ -591,7 +593,7 @@ mod fixity {
                         },
                         params
                             .iter()
-                            .map(|p| p.to_string())
+                            .map(|p| p.value.to_string())
                             .collect::<Vec<_>>()
                             .join(", "),
                         body.value,
@@ -605,7 +607,10 @@ mod fixity {
                         "{}({}) {{ {} }}",
                         name.unwrap_or(""),
                         args.iter()
-                            .map(|Binding { name, value }| format!("{name}={value}"))
+                            .map(|arg| match arg.name {
+                                Some(name) => format!("{name}={}", arg.value),
+                                None => arg.value.to_string(),
+                            })
                             .collect::<Vec<_>>()
                             .join(", "),
                         body.value,
@@ -639,6 +644,12 @@ mod fixity {
         Lit(Value<'src>),
         Tuple(Vec<Spanned<Self>>),
         Struct(StructPatt<'src>),
+    }
+
+    impl<'src> From<&'src str> for Spanned<Patt<'src>> {
+        fn from(name: &'src str) -> Self {
+            Spanned::new(Patt::Var(name.into()), 0..0)
+        }
     }
 
     impl<'src> fmt::Display for Patt<'src> {
@@ -732,7 +743,7 @@ mod fixity {
                         params
                             .value
                             .iter()
-                            .map(|p| p.to_string())
+                            .map(|p| p.value.to_string())
                             .collect::<Vec<_>>()
                             .join(", "),
                         body.value,
@@ -756,8 +767,8 @@ mod fixity {
                 Expr::Op(Op { lhs, op, rhs }) => {
                     write!(f, "({} {} {})", lhs.value, op.value, rhs.value)
                 }
-                Expr::Let(Let { binder, init, body }) => {
-                    write!(f, "let {binder} = {} {}", init.value, body.value)
+                Expr::Let(Let { patt, init, body }) => {
+                    write!(f, "let {} = {} {}", patt.value, init.value, body.value)
                 }
                 Expr::LetRec(LetRec { bindings, body }) => {
                     write!(f, "let {{")?;
@@ -770,7 +781,7 @@ mod fixity {
                                 .params
                                 .value
                                 .iter()
-                                .map(ToString::to_string)
+                                .map(|p| p.value.to_string())
                                 .collect::<Vec<_>>()
                                 .join(", "),
                             binding.body.value,
@@ -822,5 +833,11 @@ mod interp {
 
     pub type Bindings<'src> = Vec<Binding<'src>>;
 
-    pub type StructArgs<'src> = Rc<[Binding<'src>]>;
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct StructArg<'src> {
+        pub name: Option<&'src str>,
+        pub value: Rc<Value<'src>>,
+    }
+
+    pub type StructArgs<'src> = Rc<[StructArg<'src>]>;
 }

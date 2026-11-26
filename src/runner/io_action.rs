@@ -47,7 +47,7 @@ pub fn run_result<'src>(
             DefinitionId::Source(_) => plan.name,
         };
         let value = match (action_name, plan.args.as_ref()) {
-            (Some("Return"), [arg]) => Rc::clone(&arg.value),
+            (Some("IoReturn"), [arg]) => Rc::clone(&arg.value),
             (Some("Print"), [arg]) => {
                 writeln!(output, "{}", arg.value).map_err(ActionError::Output)?;
                 Rc::new(Value::Unit)
@@ -56,12 +56,12 @@ pub fn run_result<'src>(
                 writeln!(diagnostics, "{}", arg.value).map_err(ActionError::Output)?;
                 Rc::new(Value::Unit)
             }
-            (Some("Bind"), [first, next]) => {
+            (Some("IoBind"), [first, next]) => {
                 let next = match next.value.as_ref() {
                     Value::Closure(next) if next.definition().params.len() == 1 => next,
                     _ => {
                         return Err(ActionError::Runtime(Error {
-                            msg: "Expected a unary function in `Bind(plan, next)`".into(),
+                            msg: "Expected a unary function in `IoBind(plan, next)`".into(),
                             span: plan.body.span,
                         }));
                     }
@@ -71,7 +71,7 @@ pub fn run_result<'src>(
                 current = Rc::clone(&first.value);
                 continue;
             }
-            (Some(name @ ("Return" | "Print" | "Eprint" | "Bind")), _) => {
+            (Some(name @ ("IoReturn" | "Print" | "Eprint" | "IoBind")), _) => {
                 return Err(ActionError::Runtime(Error {
                     msg: format!("Wrong number of arguments for IO action `{name}`"),
                     span,
@@ -79,7 +79,8 @@ pub fn run_result<'src>(
             }
             _ => {
                 return Err(ActionError::Runtime(Error {
-                    msg: "Expected an IO action (`Return`, `Print`, `Eprint`, or `Bind`)".into(),
+                    msg: "Expected an IO action (`IoReturn`, `Print`, `Eprint`, or `IoBind`)"
+                        .into(),
                     span,
                 }));
             }

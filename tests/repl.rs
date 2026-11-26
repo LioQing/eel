@@ -117,7 +117,7 @@ fn test_file_mode_still_requires_a_let_body() {
 fn test_repl_runs_io_only_for_expression_results() {
     let output = run_repl(
         "42
-         let action = Io(print(7). bind fn(_) { eprint(8). } bind fn(_) { return(9). })
+         let action = Io(print(7). io_bind fn(_) { eprint(8). } io_bind fn(_) { io_return(9). })
          it
          action
          it + 1
@@ -131,7 +131,7 @@ fn test_repl_io_failure_preserves_it_and_the_original_error_location() {
     let output = run_repl(
         "42
          let bad = fn(x) { missing }
-         let action = Io(print(7). bind bad)
+         let action = Io(print(7). io_bind bad)
          action
          it\n",
     );

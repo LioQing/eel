@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn test_io_actions_write_to_the_repl_writers() {
         let (output, diagnostics) =
-            run_with_input("Io(print(1). bind fn(_) { eprint(2). })\n", false);
+            run_with_input("Io(print(1). io_bind fn(_) { eprint(2). })\n", false);
         assert_eq!(output, "1\nunit\n");
         assert_eq!(diagnostics, "2\n");
     }

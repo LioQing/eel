@@ -76,34 +76,61 @@ In the [C++ version of the list example](examples/cons.cpp), template
 specializations do the work of the `case` arms. Eel runs in an interpreter
 and checks types at runtime.
 
+## Monad operations
+
+The builtin `Monad` constructor pairs a binary `bind` function with a unary
+`return` function. Match the pair to use both operations in the same scope:
+
+```text
+let increment = fn(ops, action) {
+    case (ops) {
+        Monad(bind, return) => {
+            let x <- action
+            return(x + 1).
+        }
+    }
+}
+
+let Identity = Monad(fn(x, next) next(x)., fn(x) x)
+increment(Identity, 41).
+// 42
+```
+
+`IoMonad` pairs `io_bind` and `io_return`. There is no global `bind` or
+`return`: the `Monad(bind, return)` pattern above introduces both locally.
+With the same `increment`, `Io(increment(IoMonad, io_return(41).).)` runs
+the I/O plan as the final expression.
+
 ## I/O actions
 
 `print(x).` builds a plan to print `x`. To run the plan, return it from a
 file or REPL expression wrapped in `Io(...)`:
 
 ```text
-Io(let x <- return(6). print(x).)
+Io(io_return(6). io_bind print)
 // Prints 6 and returns unit.
 ```
 
-`return(x).` builds a plan that yields `x` without doing I/O. When run, plans
+`io_return(x).` builds a plan that yields `x` without doing I/O. When run, plans
 from `print(x).` and `eprint(x).` write to standard output and standard
 error, respectively, and return `unit`.
 
-`first bind next` builds a plan that runs `first`, then applies and
+`first io_bind next` builds a plan that runs `first`, then applies and
 evaluates the unary function `next` with the result. `next` must return
-a plan without an `Io` wrapper. `bind` groups to the left by default, so
+a plan without an `Io` wrapper. `io_bind` groups to the left by default, so
 you can chain several actions.
 
 Use `let x <- action` to name the result for the rest of the expression:
 
 ```text
-Io(
-    let x <- return(20).
-    let y <- return(x + 2).
-    let _ <- print(y).
-    return(x + y).
-)
+Io(case IoMonad {
+    Monad(bind, return) => {
+        let x <- return(20).
+        let y <- return(x + 2).
+        let _ <- print(y).
+        return(x + y).
+    }
+})
 // Prints 22 and returns 42.
 ```
 
@@ -112,8 +139,8 @@ in scope. A user-defined `bind` works the same way. As with `let x = ...`,
 parenthesize an infix expression on the right of `<-`. Use `_` when you
 don't need the result.
 
-The runner recognizes the built-in plan constructors `Return`, `Print`, `Eprint`,
-and `Bind`, even through aliases. It also accepts user-defined structs with
+The runner recognizes the built-in plan constructors `IoReturn`, `Print`, `Eprint`,
+and `IoBind`, even through aliases. It also accepts user-defined structs with
 those names and reads their arguments by position. It reports malformed plans
 when it reaches them.
 

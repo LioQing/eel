@@ -137,7 +137,7 @@ pub fn with_span<'src>(mut body: Rc<Spanned<Expr<'src>>>, span: Span) -> Rc<Span
 }
 
 pub fn env<'src>() -> Env<'src> {
-    fn action<'src>(name: &'static str, body_span: Span, args: StructArgs<'src>) -> Value<'src> {
+    fn data<'src>(name: &'static str, body_span: Span, args: StructArgs<'src>) -> Value<'src> {
         let applied_env = args
             .iter()
             .map(|arg| (arg.name, Rc::clone(&arg.value)))
@@ -151,162 +151,203 @@ pub fn env<'src>() -> Env<'src> {
         })
     }
 
+    let monad = builtin!("Monad" expr env [bind, ret] => Ok(Value::Unit));
+    let io = builtin!("Io" expr env [plan] => Ok(plan.clone()));
+    // These are also the constructors of plans returned by the lowercase helpers.
+    let return_plan = builtin!("IoReturn" expr env [value] => Ok(Value::Unit));
+    let print_plan = builtin!("Print" expr env [value] => Ok(Value::Unit));
+    let eprint_plan = builtin!("Eprint" expr env [value] => Ok(Value::Unit));
+    let bind_plan = builtin!("IoBind" expr env [plan, next] => Ok(Value::Unit));
+    let ret = builtin!("io_return" expr env [value] => Ok(data("IoReturn", expr.span, Rc::from([
+        Binding { name: "value", value: Rc::new(value.clone()) },
+    ]))));
+    let print = builtin!("print" expr env [value] => Ok(data("Print", expr.span, Rc::from([
+        Binding { name: "value", value: Rc::new(value.clone()) },
+    ]))));
+    let eprint = builtin!("eprint" expr env [value] => Ok(data("Eprint", expr.span, Rc::from([
+        Binding { name: "value", value: Rc::new(value.clone()) },
+    ]))));
+    let bind = builtin!("io_bind" expr env [plan, next] => Ok(data("IoBind", expr.span, Rc::from([
+        Binding { name: "plan", value: Rc::new(plan.clone()) },
+        Binding { name: "next", value: Rc::new(next.clone()) },
+    ]))));
+    let add = builtin!("+" expr env [a, b] => {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => a.checked_add(*b)
+                .map(Value::Int)
+                .ok_or_else(|| Error {
+                    msg: format!("Integer overflow: {a} + {b}"),
+                    span: expr.span,
+                }),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
+            _ => Err(Error {
+                msg: format!("Cannot add {a} and {b}"),
+                span: expr.span,
+            }),
+        }
+    });
+    let sub = builtin!("-" expr env [a, b] => {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => a.checked_sub(*b)
+                .map(Value::Int)
+                .ok_or_else(|| Error {
+                    msg: format!("Integer overflow: {a} - {b}"),
+                    span: expr.span,
+                }),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
+            _ => Err(Error {
+                msg: format!("Cannot subtract {b} from {a}"),
+                span: expr.span,
+            }),
+        }
+    });
+    let mul = builtin!("*" expr env [a, b] => {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => a.checked_mul(*b)
+                .map(Value::Int)
+                .ok_or_else(|| Error {
+                    msg: format!("Integer overflow: {a} * {b}"),
+                    span: expr.span,
+                }),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
+            _ => Err(Error {
+                msg: format!("Cannot multiply {a} and {b}"),
+                span: expr.span,
+            }),
+        }
+    });
+    let div = builtin!("/" expr env [a, b] => {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) if *b != 0 => a.checked_div(*b)
+                .map(Value::Int)
+                .ok_or_else(|| Error {
+                    msg: format!("Integer overflow: {a} / {b}"),
+                    span: expr.span,
+                }),
+            (Value::Float(a), Value::Float(b)) if *b != 0.0 => Ok(Value::Float(a / b)),
+            _ => Err(Error {
+                msg: format!("Cannot divide {a} by {b}"),
+                span: expr.span,
+            }),
+        }
+    });
+    let rem = builtin!("%" expr env [a, b] => {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) if *b != 0 => a.checked_rem(*b)
+                .map(Value::Int)
+                .ok_or_else(|| Error {
+                    msg: format!("Integer overflow: {a} % {b}"),
+                    span: expr.span,
+                }),
+            _ => Err(Error {
+                msg: format!("Cannot modulo {a} by {b}"),
+                span: expr.span,
+            }),
+        }
+    });
+    let eq = builtin!("==" expr env [a, b] => {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a == b { 1 } else { 0 })),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a == b { 1 } else { 0 })),
+            (Value::Unit, Value::Unit) => Ok(Value::Int(1)),
+            _ => Err(Error {
+                msg: format!("Cannot compare {a} and {b} for equality"),
+                span: expr.span,
+            }),
+        }
+    });
+    let ne = builtin!("!=" expr env [a, b] => {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a != b { 1 } else { 0 })),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a != b { 1 } else { 0 })),
+            (Value::Unit, Value::Unit) => Ok(Value::Int(0)),
+            _ => Err(Error {
+                msg: format!("Cannot compare {a} and {b} for inequality"),
+                span: expr.span,
+            }),
+        }
+    });
+    let gt = builtin!(">" expr env [a, b] => {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a > b { 1 } else { 0 })),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a > b { 1 } else { 0 })),
+            _ => Err(Error {
+                msg: format!("Cannot compare {a} and {b} for greater than"),
+                span: expr.span,
+            }),
+        }
+    });
+    let lt = builtin!("<" expr env [a, b] => {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a < b { 1 } else { 0 })),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a < b { 1 } else { 0 })),
+            _ => Err(Error {
+                msg: format!("Cannot compare {a} and {b} for less than"),
+                span: expr.span,
+            }),
+        }
+    });
+    let ge = builtin!(">=" expr env [a, b] => {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a >= b { 1 } else { 0 })),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a >= b { 1 } else { 0 })),
+            _ => Err(Error {
+                msg: format!("Cannot compare {a} and {b} for greater than or equal"),
+                span: expr.span,
+            }),
+        }
+    });
+    let le = builtin!("<=" expr env [a, b] => {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a <= b { 1 } else { 0 })),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a <= b { 1 } else { 0 })),
+            _ => Err(Error {
+                msg: format!("Cannot compare {a} and {b} for less than or equal"),
+                span: expr.span,
+            }),
+        }
+    });
+
+    let io_monad = (
+        "IoMonad",
+        data(
+            "Monad",
+            (0..0).into(),
+            Rc::from([
+                Binding {
+                    name: "bind",
+                    value: Rc::new(bind.1.clone()),
+                },
+                Binding {
+                    name: "ret",
+                    value: Rc::new(ret.1.clone()),
+                },
+            ]),
+        ),
+    );
     [
-        builtin!("Io" expr env [plan] => Ok(plan.clone())),
-        // These are also the constructors of plans returned by the lowercase helpers.
-        builtin!("Return" expr env [value] => Ok(Value::Unit)),
-        builtin!("Print" expr env [value] => Ok(Value::Unit)),
-        builtin!("Eprint" expr env [value] => Ok(Value::Unit)),
-        builtin!("Bind" expr env [plan, next] => Ok(Value::Unit)),
-        builtin!("return" expr env [value] => Ok(action("Return", expr.span, Rc::from([
-            Binding { name: "value", value: Rc::new(value.clone()) },
-        ])))),
-        builtin!("print" expr env [value] => Ok(action("Print", expr.span, Rc::from([
-            Binding { name: "value", value: Rc::new(value.clone()) },
-        ])))),
-        builtin!("eprint" expr env [value] => Ok(action("Eprint", expr.span, Rc::from([
-            Binding { name: "value", value: Rc::new(value.clone()) },
-        ])))),
-        builtin!("bind" expr env [plan, next] => Ok(action("Bind", expr.span, Rc::from([
-            Binding { name: "plan", value: Rc::new(plan.clone()) },
-            Binding { name: "next", value: Rc::new(next.clone()) },
-        ])))),
-        builtin!("+" expr env [a, b] => {
-            match (a, b) {
-                (Value::Int(a), Value::Int(b)) => a.checked_add(*b)
-                    .map(Value::Int)
-                    .ok_or_else(|| Error {
-                        msg: format!("Integer overflow: {a} + {b}"),
-                        span: expr.span,
-                    }),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-                _ => Err(Error {
-                    msg: format!("Cannot add {a} and {b}"),
-                    span: expr.span,
-                }),
-            }
-        }),
-        builtin!("-" expr env [a, b] => {
-            match (a, b) {
-                (Value::Int(a), Value::Int(b)) => a.checked_sub(*b)
-                    .map(Value::Int)
-                    .ok_or_else(|| Error {
-                        msg: format!("Integer overflow: {a} - {b}"),
-                        span: expr.span,
-                    }),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
-                _ => Err(Error {
-                    msg: format!("Cannot subtract {b} from {a}"),
-                    span: expr.span,
-                }),
-            }
-        }),
-        builtin!("*" expr env [a, b] => {
-            match (a, b) {
-                (Value::Int(a), Value::Int(b)) => a.checked_mul(*b)
-                    .map(Value::Int)
-                    .ok_or_else(|| Error {
-                        msg: format!("Integer overflow: {a} * {b}"),
-                        span: expr.span,
-                    }),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-                _ => Err(Error {
-                    msg: format!("Cannot multiply {a} and {b}"),
-                    span: expr.span,
-                }),
-            }
-        }),
-        builtin!("/" expr env [a, b] => {
-            match (a, b) {
-                (Value::Int(a), Value::Int(b)) if *b != 0 => a.checked_div(*b)
-                    .map(Value::Int)
-                    .ok_or_else(|| Error {
-                        msg: format!("Integer overflow: {a} / {b}"),
-                        span: expr.span,
-                    }),
-                (Value::Float(a), Value::Float(b)) if *b != 0.0 => Ok(Value::Float(a / b)),
-                _ => Err(Error {
-                    msg: format!("Cannot divide {a} by {b}"),
-                    span: expr.span,
-                }),
-            }
-        }),
-        builtin!("%" expr env [a, b] => {
-            match (a, b) {
-                (Value::Int(a), Value::Int(b)) if *b != 0 => a.checked_rem(*b)
-                    .map(Value::Int)
-                    .ok_or_else(|| Error {
-                        msg: format!("Integer overflow: {a} % {b}"),
-                        span: expr.span,
-                    }),
-                _ => Err(Error {
-                    msg: format!("Cannot modulo {a} by {b}"),
-                    span: expr.span,
-                }),
-            }
-        }),
-        builtin!("==" expr env [a, b] => {
-            match (a, b) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a == b { 1 } else { 0 })),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a == b { 1 } else { 0 })),
-                (Value::Unit, Value::Unit) => Ok(Value::Int(1)),
-                _ => Err(Error {
-                    msg: format!("Cannot compare {a} and {b} for equality"),
-                    span: expr.span,
-                }),
-            }
-        }),
-        builtin!("!=" expr env [a, b] => {
-            match (a, b) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a != b { 1 } else { 0 })),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a != b { 1 } else { 0 })),
-                (Value::Unit, Value::Unit) => Ok(Value::Int(0)),
-                _ => Err(Error {
-                    msg: format!("Cannot compare {a} and {b} for inequality"),
-                    span: expr.span,
-                }),
-            }
-        }),
-        builtin!(">" expr env [a, b] => {
-            match (a, b) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a > b { 1 } else { 0 })),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a > b { 1 } else { 0 })),
-                _ => Err(Error {
-                    msg: format!("Cannot compare {a} and {b} for greater than"),
-                    span: expr.span,
-                }),
-            }
-        }),
-        builtin!("<" expr env [a, b] => {
-            match (a, b) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a < b { 1 } else { 0 })),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a < b { 1 } else { 0 })),
-                _ => Err(Error {
-                    msg: format!("Cannot compare {a} and {b} for less than"),
-                    span: expr.span,
-                }),
-            }
-        }),
-        builtin!(">=" expr env [a, b] => {
-            match (a, b) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a >= b { 1 } else { 0 })),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a >= b { 1 } else { 0 })),
-                _ => Err(Error {
-                    msg: format!("Cannot compare {a} and {b} for greater than or equal"),
-                    span: expr.span,
-                }),
-            }
-        }),
-        builtin!("<=" expr env [a, b] => {
-            match (a, b) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a <= b { 1 } else { 0 })),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Int(if a <= b { 1 } else { 0 })),
-                _ => Err(Error {
-                    msg: format!("Cannot compare {a} and {b} for less than or equal"),
-                    span: expr.span,
-                }),
-            }
-        }),
+        monad,
+        io,
+        io_monad,
+        return_plan,
+        print_plan,
+        eprint_plan,
+        bind_plan,
+        ret,
+        print,
+        eprint,
+        bind,
+        add,
+        sub,
+        mul,
+        div,
+        rem,
+        eq,
+        ne,
+        gt,
+        lt,
+        ge,
+        le,
     ]
     .into_iter()
     .map(|(name, value)| (name, Rc::new(value)))

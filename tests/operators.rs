@@ -261,6 +261,42 @@ fn test_expressions_use_previous_binding_fixity() {
 }
 
 #[test]
+fn test_fixity_on_local_binders() {
+    for (src, expected) in [
+        ("let f = fn(opr 1 sub) { 10 sub 3 sub 2 } f(-).", 9),
+        ("let { f = fn(opl 5 add) { 2 add 3 * 4 } } f(+).", 20),
+        (
+            "let wrap = fn(x) unit case wrap((-,)) { wrap((opr 1 sub,)) => { 10 sub 3 sub 2 } }",
+            9,
+        ),
+        (
+            "let sub = - case (1, 2) { (opr 1 sub, 0) => 0 _ => { 10 sub 3 sub 2 } }",
+            5,
+        ),
+        (
+            "let bind = fn(value, next) next(value). let opr 1 sub <- - 10 sub 3 sub 2",
+            9,
+        ),
+    ] {
+        assert_returned(src, expected);
+    }
+}
+
+#[test]
+fn test_annotated_binders_require_binary_functions() {
+    for src in [
+        "let f = fn(opr 1 sub) 0 f(42).",
+        "let f = fn(opr 1 sub, x) 0 42 f 0",
+        "case (42,) { (opl 1 sub,) => 0 _ => 1 }",
+    ] {
+        assert_failure(
+            &SourceFile::new(src).run(),
+            "exactly 2 parameters, but got 42",
+        );
+    }
+}
+
+#[test]
 fn test_infix_operator_requirements() {
     for (src, message) in [
         (

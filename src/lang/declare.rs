@@ -146,17 +146,34 @@ mod lex {
 mod parse {
     use super::*;
 
-    fn fmt_fixity(f: &mut fmt::Formatter<'_>, fixity: Option<Fixity>) -> fmt::Result {
-        match fixity {
-            Some(Fixity {
-                assoc: OpAssoc::Left,
-                precedence,
-            }) => write!(f, " opl {precedence}"),
-            Some(Fixity {
-                assoc: OpAssoc::Right,
-                precedence,
-            }) => write!(f, " opr {precedence}"),
-            None => Ok(()),
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Binder<'src> {
+        pub name: &'src str,
+        pub fixity: Option<Fixity>,
+    }
+
+    impl<'src> From<&'src str> for Binder<'src> {
+        fn from(name: &'src str) -> Self {
+            Self { name, fixity: None }
+        }
+    }
+
+    impl fmt::Display for Binder<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            if let Some(Fixity { assoc, precedence }) = self.fixity {
+                let keyword = match assoc {
+                    OpAssoc::Left => "opl",
+                    OpAssoc::Right => "opr",
+                };
+                write!(f, "{keyword} {precedence} ")?;
+            }
+            write!(f, "{}", self.name)
+        }
+    }
+
+    impl SpanlessPartialEq for Binder<'_> {
+        fn spanless_eq(&self, other: &Self) -> bool {
+            self == other
         }
     }
 
@@ -166,12 +183,17 @@ mod parse {
     ) -> fmt::Result {
         write!(f, "let {{")?;
         for binding in bindings {
-            fmt_fixity(f, binding.fixity)?;
             write!(
                 f,
                 " {} = fn({}) {{ {} }}",
-                binding.name.value,
-                binding.params.value.join(", "),
+                binding.binder.value,
+                binding
+                    .params
+                    .value
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 binding.body.value,
             )?;
         }
@@ -180,16 +202,14 @@ mod parse {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct RecFn<'src, Body> {
-        pub name: Spanned<&'src str>,
-        pub fixity: Option<Fixity>,
-        pub params: Spanned<Vec<&'src str>>,
+        pub binder: Spanned<Binder<'src>>,
+        pub params: Spanned<Vec<Binder<'src>>>,
         pub body: Body,
     }
 
     impl<Body: SpanlessPartialEq> SpanlessPartialEq for RecFn<'_, Body> {
         fn spanless_eq(&self, other: &Self) -> bool {
-            self.name.value == other.name.value
-                && self.fixity == other.fixity
+            self.binder.spanless_eq(&other.binder)
                 && self.params.spanless_eq(&other.params)
                 && self.body.spanless_eq(&other.body)
         }
@@ -209,7 +229,7 @@ mod parse {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct FnExpr<'src, Body> {
-        pub params: Spanned<Vec<&'src str>>,
+        pub params: Spanned<Vec<Binder<'src>>>,
         pub body: Body,
     }
 
@@ -245,16 +265,14 @@ mod parse {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct Let<'src, E> {
-        pub fixity: Option<Fixity>,
-        pub name: &'src str,
+        pub binder: Binder<'src>,
         pub init: Box<Spanned<E>>,
         pub body: Box<Spanned<E>>,
     }
 
     impl<E: SpanlessPartialEq> SpanlessPartialEq for Let<'_, E> {
         fn spanless_eq(&self, other: &Self) -> bool {
-            self.fixity == other.fixity
-                && self.name == other.name
+            self.binder == other.binder
                 && self.init.spanless_eq(&other.init)
                 && self.body.spanless_eq(&other.body)
         }
@@ -274,16 +292,13 @@ mod parse {
 
     #[derive(Debug)]
     pub struct LetBinding<'src> {
-        pub fixity: Option<Fixity>,
-        pub name: &'src str,
+        pub binder: Binder<'src>,
         pub init: Spanned<SyntaxExpr<'src>>,
     }
 
     impl SpanlessPartialEq for LetBinding<'_> {
         fn spanless_eq(&self, other: &Self) -> bool {
-            self.fixity == other.fixity
-                && self.name == other.name
-                && self.init.spanless_eq(&other.init)
+            self.binder == other.binder && self.init.spanless_eq(&other.init)
         }
     }
 
@@ -322,10 +337,8 @@ mod parse {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 Self::Expr(expr) => write!(f, "{}", expr.value),
-                Self::Let(LetBinding { fixity, name, init }) => {
-                    write!(f, "let")?;
-                    fmt_fixity(f, *fixity)?;
-                    write!(f, " {name} = {}", init.value)
+                Self::Let(LetBinding { binder, init }) => {
+                    write!(f, "let {binder} = {}", init.value)
                 }
                 Self::LetRec(bindings) => fmt_let_rec(f, bindings),
             }
@@ -345,7 +358,7 @@ mod parse {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct LetBind<'src> {
-        pub name: Spanned<&'src str>,
+        pub name: Spanned<Binder<'src>>,
         pub arrow: Span,
         pub action: Box<Spanned<SyntaxExpr<'src>>>,
         pub body: Box<Spanned<SyntaxExpr<'src>>>,
@@ -429,15 +442,8 @@ mod parse {
                     "let {} <- {} {}",
                     b.name.value, b.action.value, b.body.value
                 ),
-                SyntaxExpr::Let(Let {
-                    fixity,
-                    name,
-                    init,
-                    body,
-                }) => {
-                    write!(f, "let")?;
-                    fmt_fixity(f, *fixity)?;
-                    write!(f, " {name} = {} {}", init.value, body.value)
+                SyntaxExpr::Let(Let { binder, init, body }) => {
+                    write!(f, "let {binder} = {} {}", init.value, body.value)
                 }
                 SyntaxExpr::LetRec(LetRec { bindings, body }) => {
                     fmt_let_rec(f, bindings)?;
@@ -492,24 +498,19 @@ mod parse {
         pub name: &'src str,
         pub fixity: Fixity,
     }
+
+    impl<'src> From<Binder<'src>> for OpSpec<'src> {
+        fn from(binder: Binder<'src>) -> Self {
+            Self {
+                name: binder.name,
+                fixity: binder.fixity.unwrap_or_default(),
+            }
+        }
+    }
 }
 
 mod fixity {
     use super::*;
-
-    fn fmt_fixity(f: &mut fmt::Formatter<'_>, fixity: Option<Fixity>) -> fmt::Result {
-        match fixity {
-            Some(Fixity {
-                assoc: OpAssoc::Left,
-                precedence,
-            }) => write!(f, " opl {precedence}"),
-            Some(Fixity {
-                assoc: OpAssoc::Right,
-                precedence,
-            }) => write!(f, " opr {precedence}"),
-            None => Ok(()),
-        }
-    }
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct Closure<'src> {
@@ -540,7 +541,7 @@ mod fixity {
     pub struct ClosureDef<'src> {
         pub id: DefinitionId<'src>,
         pub rec_name: Option<&'src str>,
-        pub params: Vec<&'src str>,
+        pub params: Vec<Binder<'src>>,
         pub body: Rc<Spanned<Expr<'src>>>,
     }
 
@@ -634,7 +635,7 @@ mod fixity {
 
     #[derive(Debug, Clone, PartialEq)]
     pub enum Patt<'src> {
-        Var(&'src str),
+        Var(Binder<'src>),
         Lit(Value<'src>),
         Tuple(Vec<Spanned<Self>>),
         Struct(StructPatt<'src>),
@@ -755,25 +756,23 @@ mod fixity {
                 Expr::Op(Op { lhs, op, rhs }) => {
                     write!(f, "({} {} {})", lhs.value, op.value, rhs.value)
                 }
-                Expr::Let(Let {
-                    fixity,
-                    name,
-                    init,
-                    body,
-                }) => {
-                    write!(f, "let")?;
-                    fmt_fixity(f, *fixity)?;
-                    write!(f, " {name} = {} {}", init.value, body.value)
+                Expr::Let(Let { binder, init, body }) => {
+                    write!(f, "let {binder} = {} {}", init.value, body.value)
                 }
                 Expr::LetRec(LetRec { bindings, body }) => {
                     write!(f, "let {{")?;
                     for binding in bindings {
-                        fmt_fixity(f, binding.fixity)?;
                         write!(
                             f,
                             " {} = fn({}) {{ {} }}",
-                            binding.name.value,
-                            binding.params.value.join(", "),
+                            binding.binder.value,
+                            binding
+                                .params
+                                .value
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", "),
                             binding.body.value,
                         )?;
                     }

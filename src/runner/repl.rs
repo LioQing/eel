@@ -170,9 +170,9 @@ impl<'src> Session<'src> {
                 self.specs.retain(|spec| spec.name != "it");
                 Ok(Some(value))
             }
-            ReplItem::Let(LetBinding { fixity, name, init }) => {
-                let (expr, specs) = fixity::resolve_let(name, fixity, init, &self.specs);
-                interp::bind(name, fixity, &expr, &mut self.env)
+            ReplItem::Let(LetBinding { binder, init }) => {
+                let (expr, specs) = fixity::resolve_let(binder, init, &self.specs);
+                interp::bind(binder, &expr, &mut self.env)
                     .map_err(|error| SubmitError::Diagnostics(vec![error.into()]))?;
                 self.specs = specs;
                 Ok(None)

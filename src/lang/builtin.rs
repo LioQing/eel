@@ -13,7 +13,7 @@ macro_rules! builtin {
                     members: Box::new([ClosureDef {
                         id: DefinitionId::Builtin($name),
                         rec_name: None,
-                        params: vec![$(stringify!($param)),*],
+                        params: vec![$(stringify!($param).into()),*],
                         body: Rc::new(Spanned::new(Expr::Builtin(|expr, env| {
                             #[allow(unused_variables)]
                             let $expr = expr;
@@ -59,7 +59,7 @@ macro_rules! builtin {
                     members: Box::new([ClosureDef {
                         id: DefinitionId::Builtin($name),
                         rec_name: None,
-                        params: vec![$(stringify!($param)),*],
+                        params: vec![$(stringify!($param).into()),*],
                         body: Rc::new(Spanned::new(ast.value, 0..0)),
                     }]),
                 }),
@@ -109,7 +109,7 @@ pub fn with_span<'src>(mut body: Rc<Spanned<Expr<'src>>>, span: Span) -> Rc<Span
             }
             Expr::LetRec(LetRec { bindings, body }) => {
                 for binding in bindings {
-                    binding.name.span = span;
+                    binding.binder.span = span;
                     binding.params.span = span;
                     set_expr_span(Rc::make_mut(&mut binding.body), span);
                 }
@@ -412,8 +412,7 @@ mod tests {
         body: Spanned<Expr<'src>>,
     ) -> Expr<'src> {
         Expr::Let(Let {
-            fixity: None,
-            name,
+            binder: name.into(),
             init: Box::new(init),
             body: Box::new(body),
         })
@@ -421,7 +420,7 @@ mod tests {
 
     fn function<'src>(params: Spanned<Vec<&'src str>>, body: Spanned<Expr<'src>>) -> Expr<'src> {
         Expr::Fn(FnExpr {
-            params,
+            params: params.map(|ps| ps.into_iter().map(Binder::from).collect()),
             body: Rc::new(body),
         })
     }
@@ -460,7 +459,7 @@ mod tests {
                     members: Box::new([ClosureDef {
                         id: DefinitionId::Builtin(name),
                         rec_name: None,
-                        params,
+                        params: params.into_iter().map(Binder::from).collect(),
                         body: Rc::new(Spanned::new(body.value, 0..0)),
                     }]),
                 }),
@@ -525,7 +524,7 @@ mod tests {
                     members: Box::new([ClosureDef {
                         id: DefinitionId::Builtin("b"),
                         rec_name: None,
-                        params: vec!["a", "b"],
+                        params: vec!["a".into(), "b".into()],
                         body: Rc::new(expected),
                     }]),
                 }),
@@ -553,7 +552,7 @@ mod tests {
                 var("a", 5..6),
                 Spanned::new(
                     vec![arm(
-                        Spanned::new(Patt::Var("_"), 9..10),
+                        Spanned::new(Patt::Var("_".into()), 9..10),
                         var("missing_internal", 14..30),
                     )],
                     7..32,
@@ -573,23 +572,24 @@ mod tests {
     fn test_eel_builtin_errors_use_utf8_call_site_boundaries() {
         let infix = spanned(op(
             spanned(Expr::Lit(Value::Int(1))),
-            var("🦀", 2..6),
+            var("ðŸ¦€", 2..6),
             spanned(Expr::Lit(Value::Int(2))),
         ));
         let prefix = evaluate(call(
-            var("🦀", 0..4),
+            var("ðŸ¦€", 0..4),
             vec![
                 spanned(Expr::Lit(Value::Int(1))),
                 spanned(Expr::Lit(Value::Int(2))),
             ],
         ));
-        for (src, expr, span) in [("1 🦀 2", infix, 2..6), ("🦀(1, 2).", prefix, 0..4)] {
+        for (src, expr, span) in [("1 ðŸ¦€ 2", infix, 2..6), ("ðŸ¦€(1, 2).", prefix, 0..4)]
+        {
             // The internal operator's 2..5 span would split the caller's emoji.
             assert_call_error(
                 src,
                 expr,
                 eel_builtin(
-                    "🦀",
+                    "ðŸ¦€",
                     vec!["a", "b"],
                     spanned(op(var("a", 0..1), var("bad", 2..5), var("b", 6..7))),
                 ),
@@ -606,12 +606,15 @@ mod tests {
             let patt = |value| Spanned::new(value, span);
             let tail = patt(Patt::Struct(StructPatt {
                 name: "tail",
-                args: Spanned::new(vec![patt(Patt::Var("rest"))], span),
+                args: Spanned::new(vec![patt(Patt::Var("rest".into()))], span),
             }));
             let pair = patt(Patt::Struct(StructPatt {
                 name: "pair",
                 args: Spanned::new(
-                    vec![patt(Patt::Tuple(vec![patt(Patt::Var("head"))])), tail],
+                    vec![
+                        patt(Patt::Tuple(vec![patt(Patt::Var("head".into()))])),
+                        tail,
+                    ],
                     span,
                 ),
             }));
@@ -626,7 +629,7 @@ mod tests {
                                 patt(Patt::Lit(Value::Int(0))),
                                 Spanned::new(Expr::Lit(Value::Int(1)), span),
                             ),
-                            arm(patt(Patt::Var("_")), var("y")),
+                            arm(patt(Patt::Var("_".into())), var("y")),
                         ],
                         span,
                     ),
@@ -738,7 +741,7 @@ mod tests {
                         Spanned::new(Expr::Lit(Value::Int(0)), 14..15),
                     ),
                     arm(
-                        Spanned::new(Patt::Var("_"), 16..17),
+                        Spanned::new(Patt::Var("_".into()), 16..17),
                         var("missing_internal", 21..37),
                     ),
                 ],
@@ -1006,7 +1009,7 @@ mod tests {
                 members: Box::new([ClosureDef {
                     id: DefinitionId::Source((0..0).into()),
                     rec_name: None,
-                    params: vec!["x"],
+                    params: vec!["x".into()],
                     body: Rc::new(spanned(Expr::Var("x"))),
                 }]),
             }),

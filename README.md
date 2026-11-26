@@ -201,6 +201,20 @@ decides the grouping. Precedence and associativity follow the binding's
 scope, including in recursive function bodies. A new binding without `opl`
 or `opr` gets the default fixity.
 
+You can put the same spec before a function parameter, a variable in a case
+pattern, or a name bound by `<-`. For example, both expressions return `9`:
+
+```eel
+let apply = fn(opr 1 sub) { 10 sub 3 sub 2 }
+apply(-).
+```
+
+```eel
+case (-, 10) { (opr 1 sub, x) => { x sub 3 sub 2 } }
+```
+
+An annotated name must receive a function with exactly two parameters.
+
 ### Integer arithmetic
 
 Eel uses signed 64-bit integers and does not implicitly mix integers and

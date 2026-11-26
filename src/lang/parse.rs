@@ -61,18 +61,19 @@ pub fn expr_and_item_parsers<
         .map(|x| SyntaxExpr::Atom(Expr::Var(x)))
         .labelled("variable");
 
-    let binding_head = just(Token::Opl)
+    let binder = just(Token::Opl)
         .to(OpAssoc::Left)
         .or(just(Token::Opr).to(OpAssoc::Right))
         .then(select! { Token::Int(v) => v })
         .map(|(assoc, precedence)| Fixity { assoc, precedence })
         .or_not()
         .then(ident.map_with(|name, e| Spanned::new(name, e.span())))
-        .then_ignore(just(Token::Assign));
+        .map(|(fixity, name)| name.map(|name| Binder { name, fixity }));
+    let binding_head = binder.clone().then_ignore(just(Token::Assign));
 
     let let_head = just(Token::Let)
         .ignore_then(binding_head.clone())
-        .map(|(fixity, name)| (fixity, name.value));
+        .map(|binder| binder.value);
 
     let mut let_rec_head = Recursive::declare();
     let mut let_bind = Recursive::declare();
@@ -138,7 +139,9 @@ pub fn expr_and_item_parsers<
 
     let fn_parts = just(Token::Fn)
         .ignore_then(
-            ident
+            binder
+                .clone()
+                .map(|binder| binder.value)
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
@@ -171,7 +174,10 @@ pub fn expr_and_item_parsers<
             )
             .map(|(name, args)| Patt::Struct(StructPatt { name, args }))
             .labelled("struct pattern");
-        let var = ident.map(Patt::Var).labelled("variable pattern");
+        let var = binder
+            .clone()
+            .map(|binder| Patt::Var(binder.value))
+            .labelled("variable pattern");
         let lit = value.map(Patt::Lit).labelled("literal pattern");
         let paren = parenthesized(case_patt)
             .map_with(|paren, e| match paren {
@@ -244,10 +250,9 @@ pub fn expr_and_item_parsers<
         .clone()
         .then(inline.clone())
         .then(expr.clone())
-        .map(|(((fixity, name), init), body)| {
+        .map(|((binder, init), body)| {
             SyntaxExpr::Let(Let {
-                fixity,
-                name,
+                binder,
                 init: Box::new(init),
                 body: Box::new(body),
             })
@@ -257,16 +262,15 @@ pub fn expr_and_item_parsers<
 
     let rec_fn = binding_head
         .then(fn_parts)
-        .map(|((fixity, name), (params, body))| RecFn {
-            name,
-            fixity,
+        .map(|(binder, (params, body))| RecFn {
+            binder,
             params,
             body,
         });
 
     let_bind.define(
         just(Token::Let)
-            .ignore_then(ident.map_with(|name, e| Spanned::new(name, e.span())))
+            .ignore_then(binder)
             .then(just(Token::BindArrow).map_with(|_, e| e.span()))
             .then(inline.clone())
             .then(expr.clone())
@@ -294,7 +298,10 @@ pub fn expr_and_item_parsers<
                 .validate(|bindings, _, emitter| {
                     let mut names = HashSet::new();
                     for binding in &bindings {
-                        let Spanned { value: name, span } = binding.name;
+                        let Spanned {
+                            value: Binder { name, .. },
+                            span,
+                        } = binding.binder;
                         if !names.insert(name) {
                             emitter.emit(Rich::custom(
                                 span,
@@ -326,7 +333,7 @@ pub fn expr_and_item_parsers<
     let let_item = let_head
         .then(expr.clone())
         .then_ignore(end())
-        .map(|((fixity, name), init)| ReplItem::Let(LetBinding { fixity, name, init }))
+        .map(|(binder, init)| ReplItem::Let(LetBinding { binder, init }))
         .labelled("let item");
 
     let let_rec_item = let_rec_head
@@ -398,7 +405,7 @@ mod tests {
         body: Spanned<SyntaxExpr<'src>>,
     ) -> Spanned<SyntaxExpr<'src>> {
         spanned(SyntaxExpr::Fn(FnExpr {
-            params: spanned(params),
+            params: spanned(params.into_iter().map(Binder::from).collect()),
             body: Box::new(body),
         }))
     }
@@ -434,8 +441,7 @@ mod tests {
         body: Spanned<SyntaxExpr<'src>>,
     ) -> Spanned<SyntaxExpr<'src>> {
         spanned(SyntaxExpr::Let(Let {
-            fixity,
-            name,
+            binder: Binder { name, fixity },
             init: Box::new(init),
             body: Box::new(body),
         }))
@@ -547,7 +553,7 @@ mod tests {
 
     #[test]
     fn test_var_emoji() {
-        assert_parse!("🦀", atom(Expr::Var("🦀")));
+        assert_parse!("ðŸ¦€", atom(Expr::Var("ðŸ¦€")));
     }
 
     #[test]
@@ -674,7 +680,7 @@ mod tests {
     fn test_case_single_arm_var_pattern() {
         assert_parse!(
             "case x { y => z }",
-            case(var("x"), vec![(Patt::Var("y"), var("z"))]),
+            case(var("x"), vec![(Patt::Var("y".into()), var("z"))]),
         );
     }
 
@@ -684,7 +690,10 @@ mod tests {
             "case x { y(z) => w }",
             case(
                 var("x"),
-                vec![(struct_patt("y", vec![spanned(Patt::Var("z"))]), var("w"))]
+                vec![(
+                    struct_patt("y", vec![spanned(Patt::Var("z".into()))]),
+                    var("w")
+                )]
             ),
         );
     }
@@ -698,7 +707,7 @@ mod tests {
                 vec![(
                     Patt::Tuple(vec![
                         spanned(Patt::Lit(Value::Unit)),
-                        spanned(Patt::Tuple(vec![spanned(Patt::Var("y"))])),
+                        spanned(Patt::Tuple(vec![spanned(Patt::Var("y".into()))])),
                     ]),
                     var("y"),
                 )],
@@ -719,10 +728,10 @@ mod tests {
             case(
                 var("x"),
                 vec![
-                    (Patt::Var("w"), int(42)),
+                    (Patt::Var("w".into()), int(42)),
                     (Patt::Lit(Value::Int(42)), var("x")),
                     (
-                        struct_patt("y", vec![spanned(Patt::Var("z"))]),
+                        struct_patt("y", vec![spanned(Patt::Var("z".into()))]),
                         call(var("f"), vec![var("z")]),
                     ),
                 ],
@@ -870,27 +879,30 @@ mod tests {
             spanned(SyntaxExpr::LetRec(LetRec {
                 bindings: vec![
                     RecFn {
-                        name: spanned("first"),
-                        fixity: None,
-                        params: spanned(vec!["n"]),
+                        binder: spanned("first".into()),
+                        params: spanned(vec!["n".into()]),
                         body: atom(Expr::Var("later")),
                     },
                     RecFn {
-                        name: spanned("left"),
-                        fixity: Some(Fixity {
-                            assoc: OpAssoc::Left,
-                            precedence: 4
+                        binder: spanned(Binder {
+                            name: "left",
+                            fixity: Some(Fixity {
+                                assoc: OpAssoc::Left,
+                                precedence: 4
+                            })
                         }),
-                        params: spanned(vec!["a", "b"]),
+                        params: spanned(vec!["a".into(), "b".into()]),
                         body: atom(Expr::Var("a")),
                     },
                     RecFn {
-                        name: spanned("later"),
-                        fixity: Some(Fixity {
-                            assoc: OpAssoc::Right,
-                            precedence: 2
+                        binder: spanned(Binder {
+                            name: "later",
+                            fixity: Some(Fixity {
+                                assoc: OpAssoc::Right,
+                                precedence: 2
+                            })
                         }),
-                        params: spanned(vec!["a", "b"]),
+                        params: spanned(vec!["a".into(), "b".into()]),
                         body: atom(Expr::Var("b")),
                     },
                 ],
@@ -978,8 +990,7 @@ mod tests {
     fn test_repl_item_accepts_standalone_let_with_infix_expr() {
         let item = parse_repl_item("let x = 2 + 3 * 4").unwrap();
         let expected = ReplItem::Let(LetBinding {
-            fixity: None,
-            name: "x",
+            binder: "x".into(),
             init: ops(
                 atom(Expr::Lit(Value::Int(2))),
                 vec![
@@ -994,17 +1005,17 @@ mod tests {
     #[test]
     fn test_repl_item_accepts_operator_declaration() {
         let item = parse_repl_item("let opr 3 sub = fn(a, b) {\n    a - b\n}").unwrap();
-        let ReplItem::Let(LetBinding { fixity, name, init }) = item else {
+        let ReplItem::Let(LetBinding { binder, init }) = item else {
             panic!("Expected declaration, got {item:?}");
         };
         assert_eq!(
-            fixity,
+            binder.fixity,
             Some(Fixity {
                 assoc: OpAssoc::Right,
                 precedence: 3
             })
         );
-        assert_eq!(name, "sub");
+        assert_eq!(binder.name, "sub");
         assert!(matches!(init.value, SyntaxExpr::Fn(_)));
     }
 
@@ -1015,7 +1026,7 @@ mod tests {
         let ReplItem::LetRec(members) = item else {
             panic!("Expected recursive let declaration, got {item:?}");
         };
-        assert_eq!(members[0].name.value, "f");
+        assert_eq!(members[0].binder.value.name, "f");
         assert!(matches!(members[0].body.value, SyntaxExpr::Let(_)));
 
         let expression = format!("{declaration} f().");

@@ -40,11 +40,8 @@ fn reduce_op<'src>(operands: &mut Vec<Spanned<Expr<'src>>>, op: Spanned<Expr<'sr
 
 fn shadow_patt<'src>(patt: &Patt<'src>, specs: &mut Vec<OpSpec<'src>>) {
     let children = match patt {
-        Patt::Var(name) => {
-            specs.push(OpSpec {
-                name,
-                fixity: Fixity::default(),
-            });
+        Patt::Var(binder) => {
+            specs.push((*binder).into());
             return;
         }
         Patt::Tuple(elements) => elements,
@@ -58,30 +55,23 @@ fn shadow_patt<'src>(patt: &Patt<'src>, specs: &mut Vec<OpSpec<'src>>) {
 }
 
 fn resolve_fn_body<'src>(
-    params: &[&'src str],
+    params: &[Binder<'src>],
     body: Spanned<SyntaxExpr<'src>>,
     specs: &[OpSpec<'src>],
 ) -> Rc<Spanned<Expr<'src>>> {
     let mut scoped_specs = specs.to_vec();
-    scoped_specs.extend(params.iter().map(|name| OpSpec {
-        name,
-        fixity: Fixity::default(),
-    }));
+    scoped_specs.extend(params.iter().copied().map(OpSpec::from));
     Rc::new(resolve(body, &scoped_specs))
 }
 
 /// Resolves the expression and returns the fixities in scope after the binding.
 pub fn resolve_let<'src>(
-    name: &'src str,
-    fixity: Option<Fixity>,
+    binder: Binder<'src>,
     expr: Spanned<SyntaxExpr<'src>>,
     specs: &[OpSpec<'src>],
 ) -> (Spanned<Expr<'src>>, Vec<OpSpec<'src>>) {
     let mut scoped_specs = specs.to_vec();
-    scoped_specs.push(OpSpec {
-        name,
-        fixity: fixity.unwrap_or_default(),
-    });
+    scoped_specs.push(binder.into());
 
     // Only a function definition sees the new binding from its expression.
     let expr_specs = if matches!(&expr.value, SyntaxExpr::Fn(_)) {
@@ -99,16 +89,16 @@ pub fn resolve_let_rec<'src>(
     specs: &[OpSpec<'src>],
 ) -> (Vec<RecFn<'src, Rc<Spanned<Expr<'src>>>>>, Vec<OpSpec<'src>>) {
     let mut scoped_specs = specs.to_vec();
-    scoped_specs.extend(members.iter().map(|member| OpSpec {
-        name: member.name.value,
-        fixity: member.fixity.unwrap_or_default(),
-    }));
+    scoped_specs.extend(
+        members
+            .iter()
+            .map(|member| OpSpec::from(member.binder.value)),
+    );
 
     let members = members
         .into_iter()
         .map(|member| RecFn {
-            name: member.name,
-            fixity: member.fixity,
+            binder: member.binder,
             body: resolve_fn_body(&member.params.value, member.body, &scoped_specs),
             params: member.params,
         })
@@ -117,6 +107,7 @@ pub fn resolve_let_rec<'src>(
     (members, scoped_specs)
 }
 
+/// Resolves the syntax expression into an expression with operator fixities applied.
 pub fn resolve<'src>(
     Spanned { value: expr, span }: Spanned<SyntaxExpr<'src>>,
     specs: &[OpSpec<'src>],
@@ -188,16 +179,10 @@ pub fn resolve<'src>(
             }
             operands.pop().unwrap().value
         }
-        SyntaxExpr::Let(Let {
-            fixity,
-            name,
-            init,
-            body,
-        }) => {
-            let (init, scoped_specs) = resolve_let(name, fixity, *init, specs);
+        SyntaxExpr::Let(Let { binder, init, body }) => {
+            let (init, scoped_specs) = resolve_let(binder, *init, specs);
             Expr::Let(Let {
-                fixity,
-                name,
+                binder,
                 init: Box::new(init),
                 body: Box::new(resolve(*body, &scoped_specs)),
             })
@@ -259,8 +244,7 @@ mod tests {
         body: Spanned<Expr<'src>>,
     ) -> Spanned<Expr<'src>> {
         spanned(Expr::Let(Let {
-            fixity,
-            name,
+            binder: Binder { name, fixity },
             init: Box::new(assign),
             body: Box::new(body),
         }))
@@ -268,7 +252,7 @@ mod tests {
 
     fn function<'src>(params: Vec<&'src str>, body: Spanned<Expr<'src>>) -> Spanned<Expr<'src>> {
         spanned(Expr::Fn(FnExpr {
-            params: spanned(params),
+            params: spanned(params.into_iter().map(Binder::from).collect()),
             body: Rc::new(body),
         }))
     }
@@ -331,8 +315,7 @@ mod tests {
         body: Spanned<SyntaxExpr<'src>>,
     ) -> Spanned<SyntaxExpr<'src>> {
         spanned(SyntaxExpr::Let(Let {
-            fixity,
-            name,
+            binder: Binder { name, fixity },
             init: Box::new(assign),
             body: Box::new(body),
         }))
@@ -343,7 +326,7 @@ mod tests {
         body: Spanned<SyntaxExpr<'src>>,
     ) -> Spanned<SyntaxExpr<'src>> {
         spanned(SyntaxExpr::Fn(FnExpr {
-            params: spanned(params),
+            params: spanned(params.into_iter().map(Binder::from).collect()),
             body: Box::new(body),
         }))
     }
@@ -969,7 +952,7 @@ mod tests {
             ),
         );
         let zero = spanned(Patt::Lit(Value::Int(0)));
-        let wildcard = spanned(Patt::Var("_"));
+        let wildcard = spanned(Patt::Var("_".into()));
         assert_resolve(
             syntax_binding(
                 left,
@@ -1071,7 +1054,7 @@ mod tests {
                 function(vec!["sub"], left_sub_chain()),
             ),
             {
-                let sub = spanned(Patt::Var("sub"));
+                let sub = spanned(Patt::Var("sub".into()));
                 (
                     syntax_case(syntax_var("ordinary"), vec![(sub.clone(), sub_chain())]),
                     case(var("ordinary"), vec![(sub, left_sub_chain())]),
@@ -1080,7 +1063,7 @@ mod tests {
             {
                 let wrap = spanned(Patt::Struct(StructPatt {
                     name: "wrap",
-                    args: spanned(vec![spanned(Patt::Var("sub"))]),
+                    args: spanned(vec![spanned(Patt::Var("sub".into()))]),
                 }));
                 (
                     syntax_case(syntax_var("wrapped"), vec![(wrap.clone(), sub_chain())]),
@@ -1144,21 +1127,24 @@ mod tests {
         let chain = syntax_int_ops(10, &[("sub", 3), ("sub", 2), ("join", 5), ("join", 1)]);
         let members = vec![
             RecFn {
-                name: spanned("probe"),
-                fixity: None,
+                binder: spanned("probe".into()),
                 params: spanned(vec![]),
                 body: chain.clone(),
             },
             RecFn {
-                name: spanned("sub"),
-                fixity: declared(OpAssoc::Right, 4),
-                params: spanned(vec!["a", "b"]),
+                binder: spanned(Binder {
+                    name: "sub",
+                    fixity: declared(OpAssoc::Right, 4),
+                }),
+                params: spanned(vec!["a".into(), "b".into()]),
                 body: syntax_var("a"),
             },
             RecFn {
-                name: spanned("join"),
-                fixity: declared(OpAssoc::Left, 2),
-                params: spanned(vec!["a", "b"]),
+                binder: spanned(Binder {
+                    name: "join",
+                    fixity: declared(OpAssoc::Left, 2),
+                }),
+                params: spanned(vec!["a".into(), "b".into()]),
                 body: syntax_var("a"),
             },
         ];
@@ -1194,9 +1180,11 @@ mod tests {
             ]
             .into_iter()
             .map(|(name, params)| RecFn {
-                name: spanned(name),
-                fixity: if name == "sub" { fixity } else { None },
-                params: spanned(params),
+                binder: spanned(Binder {
+                    name,
+                    fixity: if name == "sub" { fixity } else { None },
+                }),
+                params: spanned(params.into_iter().map(Binder::from).collect()),
                 body: sub_chain(),
             })
             .collect();

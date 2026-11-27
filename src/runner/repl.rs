@@ -8,7 +8,7 @@ use typed_arena::Arena;
 
 use crate::lang::{
     builtin,
-    declare::{Env, LetBinding, OpSpec, ReplItem, Spanned, Value},
+    declare::{Env, LetItem, OpSpec, ReplItem, Spanned, Value},
     fixity, interp, parse,
 };
 
@@ -170,7 +170,7 @@ impl<'src> Session<'src> {
                 self.specs.retain(|spec| spec.name != "it");
                 Ok(Some(value))
             }
-            ReplItem::Let(LetBinding { patt, init }) => {
+            ReplItem::Let(LetItem { patt, init }) => {
                 let (expr, specs) = fixity::resolve_let(&patt.value, init, &self.specs);
                 interp::bind(&patt, &expr, &mut self.env)
                     .map_err(|error| SubmitError::Diagnostics(vec![error.into()]))?;

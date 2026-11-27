@@ -327,7 +327,7 @@ pub fn expr_and_item_parsers<
     let let_item = let_head
         .then(expr.clone())
         .then_ignore(end())
-        .map(|(patt, init)| ReplItem::Let(LetBinding { patt, init }))
+        .map(|(patt, init)| ReplItem::Let(LetItem { patt, init }))
         .labelled("let item");
 
     let let_rec_item = let_rec_head
@@ -983,7 +983,7 @@ mod tests {
     #[test]
     fn test_repl_item_accepts_standalone_let_with_infix_expr() {
         let item = parse_repl_item("let x = 2 + 3 * 4").unwrap();
-        let expected = ReplItem::Let(LetBinding {
+        let expected = ReplItem::Let(LetItem {
             patt: spanned(Patt::Var("x".into())),
             init: ops(
                 atom(Expr::Lit(Value::Int(2))),
@@ -999,7 +999,7 @@ mod tests {
     #[test]
     fn test_repl_item_accepts_operator_declaration() {
         let item = parse_repl_item("let opr 3 sub = fn(a, b) {\n    a - b\n}").unwrap();
-        let ReplItem::Let(LetBinding { patt, init }) = item else {
+        let ReplItem::Let(LetItem { patt, init }) = item else {
             panic!("Expected declaration, got {item:?}");
         };
         let Patt::Var(binder) = patt.value else {

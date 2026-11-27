@@ -180,13 +180,19 @@ pub fn env<'src>() -> Env<'src> {
         })
     }
 
+    // Monad typeclass
     let monad = builtin!("Monad" expr env [bind, ret] => Ok(Value::Unit));
+
+    // IO monad
     let io = builtin!("Io" expr env [plan] => Ok(plan.clone()));
-    // These are also the constructors of plans returned by the lowercase helpers.
+
+    // IO plan
     let return_plan = builtin!("IoReturn" expr env [value] => Ok(Value::Unit));
     let print_plan = builtin!("Print" expr env [value] => Ok(Value::Unit));
     let eprint_plan = builtin!("Eprint" expr env [value] => Ok(Value::Unit));
     let bind_plan = builtin!("IoBind" expr env [plan, next] => Ok(Value::Unit));
+
+    // IO plan constructors
     let ret = builtin!("io_return" expr env [value] => Ok(data("IoReturn", expr.span, [
         Binding { name: "value", value: Rc::new(value.clone()) },
     ])));
@@ -200,6 +206,27 @@ pub fn env<'src>() -> Env<'src> {
         Binding { name: "plan", value: Rc::new(plan.clone()) },
         Binding { name: "next", value: Rc::new(next.clone()) },
     ])));
+
+    // IO monad typeclass instance
+    let io_monad = (
+        "IoMonad",
+        data(
+            "Monad",
+            (0..0).into(),
+            [
+                Binding {
+                    name: "bind",
+                    value: Rc::new(bind.1.clone()),
+                },
+                Binding {
+                    name: "ret",
+                    value: Rc::new(ret.1.clone()),
+                },
+            ],
+        ),
+    );
+
+    // Arithmetic operator
     let add = builtin!("+" expr env [a, b] => {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => a.checked_add(*b)
@@ -244,6 +271,8 @@ pub fn env<'src>() -> Env<'src> {
             _ => Err(Error::new(expr.span, format!("Cannot modulo {a} by {b}"))),
         }
     });
+
+    // Comparison operator
     let eq = builtin!("==" expr env [a, b] => {
         match (a, b) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(if a == b { 1 } else { 0 })),
@@ -289,28 +318,9 @@ pub fn env<'src>() -> Env<'src> {
         }
     });
 
-    let io_monad = (
-        "IoMonad",
-        data(
-            "Monad",
-            (0..0).into(),
-            [
-                Binding {
-                    name: "bind",
-                    value: Rc::new(bind.1.clone()),
-                },
-                Binding {
-                    name: "ret",
-                    value: Rc::new(ret.1.clone()),
-                },
-            ],
-        ),
-    );
-
     [
         monad,
         io,
-        io_monad,
         return_plan,
         print_plan,
         eprint_plan,
@@ -319,6 +329,7 @@ pub fn env<'src>() -> Env<'src> {
         print,
         eprint,
         bind,
+        io_monad,
         add,
         sub,
         mul,

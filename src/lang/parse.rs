@@ -10,6 +10,12 @@ enum Parenthesized<T> {
     Tuple(Vec<T>),
 }
 
+#[derive(Clone)]
+enum Postfix<'src> {
+    Call(Spanned<Vec<Spanned<SyntaxExpr<'src>>>>),
+    Eval(Option<Spanned<&'src str>>),
+}
+
 fn parenthesized<'toks, 'src: 'toks, I, T>(
     element: impl Parser<'toks, I, T, extra::Err<Rich<'toks, Token<'src>, Span>>> + Clone,
 ) -> impl Parser<'toks, I, Parenthesized<T>, extra::Err<Rich<'toks, Token<'src>, Span>>> + Clone
@@ -80,6 +86,7 @@ pub fn expr_and_item_parsers<
     let block = expr
         .clone()
         .delimited_by(just(Token::OpenBrace), just(Token::CloseBrace))
+        .map_with(|expr, e| Spanned::new(SyntaxExpr::Block(Box::new(expr)), e.span()))
         .recover_with(via_parser(nested_delimiters(
             Token::OpenBrace,
             Token::CloseBrace,
@@ -93,7 +100,7 @@ pub fn expr_and_item_parsers<
             Parenthesized::Empty => {
                 Spanned::new(SyntaxExpr::Atom(Expr::Lit(Value::Unit)), e.span())
             }
-            Parenthesized::Group(expr) => expr,
+            Parenthesized::Group(expr) => Spanned::new(SyntaxExpr::Group(Box::new(expr)), e.span()),
             Parenthesized::Tuple(elements) => Spanned::new(SyntaxExpr::Tuple(elements), e.span()),
         })
         .recover_with(via_parser(nested_delimiters(
@@ -108,6 +115,15 @@ pub fn expr_and_item_parsers<
         .map_with(|expr, e| Spanned::new(expr, e.span()))
         .or(choice((block, paren)));
 
+    let dot = just(Token::Dot).map_with(|_, e| e.span());
+    let dot_suffix = dot
+        .clone()
+        .then(ident.map_with(|name, e| Spanned::new(name, e.span())))
+        // Must have no space between dot and field name to avoid ambiguity with operators.
+        .filter(|(dot, field): &(Span, Spanned<&str>)| dot.end == field.span.start)
+        .map(|(_, field)| Postfix::Eval(Some(field)))
+        .or(dot.to(Postfix::Eval(None)));
+
     let postfix = atom
         .clone()
         .foldl_with(
@@ -116,16 +132,16 @@ pub fn expr_and_item_parsers<
                 .allow_trailing()
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::OpenParen), just(Token::CloseParen))
-                .map_with(|args, e| Some(Spanned::new(args, e.span())))
-                .or(just(Token::Dot).to(None))
+                .map_with(|args, e| Postfix::Call(Spanned::new(args, e.span())))
+                .or(dot_suffix)
                 .repeated(),
-            |operand, args, e| {
-                let expr = match args {
-                    Some(args) => SyntaxExpr::Call(Call {
+            |operand, suffix, e| {
+                let expr = match suffix {
+                    Postfix::Call(args) => SyntaxExpr::Call(Call {
                         callee: Box::new(operand),
                         args,
                     }),
-                    None => SyntaxExpr::Eval(Box::new(operand)),
+                    Postfix::Eval(field) => SyntaxExpr::Eval(Eval::new(operand, field)),
                 };
                 Spanned::new(expr, e.span())
             },
@@ -174,6 +190,14 @@ pub fn expr_and_item_parsers<
                 .map_with(|params, e| Spanned::new(params, e.span())),
         )
         .then(inline.clone())
+        .map(|(params, body)| {
+            // Only the function's own braces introduce its field scope.
+            let body = match body.value {
+                SyntaxExpr::Block(inner) => *inner,
+                _ => body,
+            };
+            (params, body)
+        })
         .labelled("function expression");
 
     let r#fn = fn_parts.clone().map_with(|(params, body), e| {
@@ -391,7 +415,22 @@ mod tests {
     }
 
     fn evaluate(operand: Spanned<SyntaxExpr<'_>>) -> Spanned<SyntaxExpr<'_>> {
-        spanned(SyntaxExpr::Eval(Box::new(operand)))
+        spanned(SyntaxExpr::Eval(Eval::new(operand, None)))
+    }
+
+    fn field<'src>(
+        operand: Spanned<SyntaxExpr<'src>>,
+        name: &'src str,
+    ) -> Spanned<SyntaxExpr<'src>> {
+        spanned(SyntaxExpr::Eval(Eval::new(operand, Some(spanned(name)))))
+    }
+
+    fn group(expr: Spanned<SyntaxExpr<'_>>) -> Spanned<SyntaxExpr<'_>> {
+        spanned(SyntaxExpr::Group(Box::new(expr)))
+    }
+
+    fn block(expr: Spanned<SyntaxExpr<'_>>) -> Spanned<SyntaxExpr<'_>> {
+        spanned(SyntaxExpr::Block(Box::new(expr)))
     }
 
     fn function<'src>(
@@ -566,6 +605,31 @@ mod tests {
     }
 
     #[test]
+    fn test_field_access_chains_with_calls_and_force() {
+        assert_parse!(
+            "foo(1).method(2)..value",
+            field(
+                evaluate(call(
+                    field(call(var("foo"), vec![int(1)]), "method"),
+                    vec![int(2)]
+                )),
+                "value",
+            ),
+        );
+        assert_parse!(
+            "foo().field + bar().other",
+            ops(
+                field(call(var("foo"), vec![]), "field"),
+                vec![("+", field(call(var("bar"), vec![]), "other"))],
+            ),
+        );
+        assert_parse!(
+            "foo().\nadd 1",
+            ops(evaluate(call(var("foo"), vec![])), vec![("add", int(1))]),
+        );
+    }
+
+    #[test]
     fn test_call_multiple_arg_types() {
         assert_parse!(
             "foo(1, 2.0, bar)",
@@ -585,11 +649,11 @@ mod tests {
     fn test_tuple_parentheses_and_call_arguments() {
         let singleton = spanned(SyntaxExpr::Tuple(vec![var("x")]));
         assert_parse!("()", atom(Expr::Lit(Value::Unit)));
-        assert_parse!("(x)", var("x"));
+        assert_parse!("(x)", group(var("x")));
         assert_parse!("(x,)", singleton.clone());
         assert_parse!(
             "(x, (y),)",
-            spanned(SyntaxExpr::Tuple(vec![var("x"), var("y")]))
+            spanned(SyntaxExpr::Tuple(vec![var("x"), group(var("y"))]))
         );
         assert_parse!("f(x,)", call(var("f"), vec![var("x")]));
         assert_parse!("f((x,))", call(var("f"), vec![singleton]));
@@ -738,7 +802,7 @@ mod tests {
         assert_parse!(
             "case (x + y) { 42 => z }",
             case(
-                ops(var("x"), vec![("+", var("y"))]),
+                group(ops(var("x"), vec![("+", var("y"))])),
                 vec![(Patt::Lit(Value::Int(42)), var("z"))]
             ),
         );
@@ -773,11 +837,12 @@ mod tests {
         assert_parse!(
             "(x + y) * z",
             ops(
-                ops(x.clone(), vec![("+", y.clone())]),
+                group(ops(x.clone(), vec![("+", y.clone())])),
                 vec![("*", z.clone())]
             ),
         );
-        assert_parse!("x * (y + z)", ops(x, vec![("*", ops(y, vec![("+", z)]))]));
+        let grouped_rhs = group(ops(y, vec![("+", z)]));
+        assert_parse!("x * (y + z)", ops(x, vec![("*", grouped_rhs)]));
     }
 
     #[test]
@@ -833,7 +898,12 @@ mod tests {
             }
             x
             ",
-            binding(None, "x", binding(None, "y", int(42), var("y")), var("x")),
+            binding(
+                None,
+                "x",
+                block(binding(None, "y", int(42), var("y"))),
+                var("x"),
+            ),
         );
     }
 
@@ -1051,6 +1121,7 @@ mod tests {
     fn test_repl_item_display() {
         for (src, expected) in [
             ("1 + 2", "(1 + 2)"),
+            ("f(1).field", "f(1).field"),
             ("let t = (1, (2,),)", "let t = (1, (2,))"),
             ("case t { (x,) => (x,) }", "case t { (x,) => (x,) }"),
             ("let  x = 42", "let x = 42"),

@@ -75,8 +75,12 @@ pub fn resolve_let<'src>(
     let mut scoped_specs = specs.to_vec();
     shadow_patt(patt, &mut scoped_specs);
 
-    // Only a function definition sees the new binding from its expression.
-    let expr_specs = if matches!((patt, &expr.value), (Patt::Var(_), SyntaxExpr::Fn(_))) {
+    let mut init = &expr.value;
+    while let SyntaxExpr::Block(inner) | SyntaxExpr::Group(inner) = init {
+        init = &inner.value;
+    }
+
+    let expr_specs = if matches!((patt, init), (Patt::Var(_), SyntaxExpr::Fn(_))) {
         scoped_specs.as_slice()
     } else {
         specs
@@ -116,6 +120,16 @@ pub fn resolve<'src>(
 ) -> Spanned<Expr<'src>> {
     let expr = match expr {
         SyntaxExpr::Atom(expr) => expr,
+        SyntaxExpr::Block(inner) | SyntaxExpr::Group(inner) => {
+            let inner = resolve(*inner, specs);
+
+            // Keep the grouped scope if the inner expression is a let chain, excluding let bind.
+            if matches!(inner.value, Expr::Let(_) | Expr::LetRec(_)) {
+                Expr::Scope(Box::new(inner))
+            } else {
+                return inner;
+            }
+        }
         SyntaxExpr::Tuple(elements) => Expr::Tuple(
             elements
                 .into_iter()
@@ -142,7 +156,9 @@ pub fn resolve<'src>(
             callee: Box::new(resolve(*callee, specs)),
             args: args.map(|args| args.into_iter().map(|arg| resolve(arg, specs)).collect()),
         }),
-        SyntaxExpr::Eval(operand) => Expr::Eval(Box::new(resolve(*operand, specs))),
+        SyntaxExpr::Eval(Eval { operand, field }) => {
+            Expr::Eval(Eval::new(resolve(*operand, specs), field))
+        }
         SyntaxExpr::Fn(FnExpr { params, body }) => {
             let body = resolve_fn_body(&params.value, *body, specs);
             Expr::Fn(FnExpr { params, body })
@@ -837,8 +853,8 @@ mod tests {
 
     #[test]
     fn test_calls_contain_independent_operator_chains() {
-        let syntax_eval = |operand| spanned(SyntaxExpr::Eval(Box::new(operand)));
-        let evaluate = |operand| spanned(Expr::Eval(Box::new(operand)));
+        let syntax_eval = |operand| spanned(SyntaxExpr::Eval(Eval::new(operand, None)));
+        let evaluate = |operand| spanned(Expr::Eval(Eval::new(operand, None)));
         let syntax_id = |arg| syntax_eval(syntax_call(syntax_var("id"), vec![arg]));
         let id = |arg| evaluate(call(var("id"), vec![arg]));
         assert_resolve(
@@ -982,11 +998,11 @@ mod tests {
     fn test_function_fixity_is_lexical_not_call_site_dependent() {
         let left = declared(OpAssoc::Left, 1);
         let right = declared(OpAssoc::Right, 1);
-        let syntax_f = spanned(SyntaxExpr::Eval(Box::new(syntax_call(
-            syntax_var("f"),
-            vec![],
-        ))));
-        let f = spanned(Expr::Eval(Box::new(call(var("f"), vec![]))));
+        let syntax_f = spanned(SyntaxExpr::Eval(Eval::new(
+            syntax_call(syntax_var("f"), vec![]),
+            None,
+        )));
+        let f = spanned(Expr::Eval(Eval::new(call(var("f"), vec![]), None)));
         assert_resolve(
             syntax_binding(
                 left,

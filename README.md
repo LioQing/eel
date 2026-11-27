@@ -3,6 +3,7 @@
 Eel is a toy functional language inspired by C++ template metaprogramming.
 Applying a function with `f(x)` gives you a value Eel calls a *struct*. Add
 a trailing dot, `f(x).`, to evaluate the function body and get its result.
+Use `f(x).name` to get a binding from the function's local scope instead.
 
 ## Try it
 
@@ -61,6 +62,30 @@ Here `cons` and `nil` are list constructors. Their bodies return `unit`,
 but the list code never evaluates them. The full
 [list example](examples/cons.eel) also defines `map`, which takes a function
 as an argument and uses `f(x).` to compute each new element.
+
+### Field access
+
+`f(x).name` evaluates the `let` and `let { ... }` declarations at the top
+level of the function body, then returns the latest local binding named
+`name`. This includes names introduced by parameter and `let` patterns.
+The final expression is skipped, and field access stops before the first
+`let ... <- ...` without running it. Errors in the `let` initializers that
+do run are still reported.
+
+```eel
+let make = fn(x) {
+    let double = (x * 2)
+    unit
+}
+make(21).double
+// 42
+```
+
+Captured names and bindings inside nested blocks or `case` arms aren't
+fields. A missing name is a runtime error. A field that holds a struct or
+function returns that value without forcing it, so accesses and calls can
+be chained. The field name must immediately follow the dot, so `f(x). + 1`
+still adds `1` to the result of `f(x).`.
 
 ### Tuples
 
@@ -197,9 +222,9 @@ With `opr`, it groups as `10 sub (3 sub 2)` and gives `9`.
 Infix notation applies the function and evaluates its body in one step.
 In call notation, the same operation takes a dot: `sub(10, 3).`.
 
-Higher precedence numbers bind more tightly. Function application and the
-trailing dot bind more tightly than infix operators. Use parentheses to
-override the grouping.
+Higher precedence numbers bind more tightly. Function application, the
+trailing dot, and field access bind more tightly than infix operators.
+Use parentheses to override the grouping.
 
 Built-in operators are left-associative:
 

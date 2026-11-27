@@ -50,6 +50,7 @@ fn prepare_closure_call<'src>(
     // even when an earlier parameter binds the same name.
     let pattern_env = applied_env.clone();
 
+    let mut param_names = Vec::new();
     let args = params
         .iter()
         .zip(args)
@@ -60,6 +61,7 @@ fn prepare_closure_call<'src>(
                     Some(span) => error.with_secondary(span, "Argument passed here"),
                     None => error,
                 })?;
+            param_names.extend(bindings.iter().map(|binding| binding.name));
             insert_bindings(&mut applied_env, bindings);
 
             let name = match patt.value {
@@ -77,6 +79,7 @@ fn prepare_closure_call<'src>(
         body,
         args,
         applied_env,
+        param_names: param_names.into(),
     })
 }
 
@@ -276,6 +279,53 @@ pub fn eval_unary_closure<'src>(
     eval(&applied.body, applied.applied_env)
 }
 
+fn eval_field<'src>(
+    applied: Struct<'src>,
+    field: Spanned<&'src str>,
+) -> Result<Value<'src>, Error> {
+    fn binds(patt: &Patt<'_>, name: &str) -> bool {
+        match patt {
+            Patt::Var(binder) => binder.name == name,
+            Patt::Tuple(elements) => elements.iter().any(|patt| binds(&patt.value, name)),
+            Patt::Struct(patt) => patt.args.value.iter().any(|patt| binds(&patt.value, name)),
+            Patt::Lit(_) => false,
+        }
+    }
+
+    let Struct {
+        body,
+        mut applied_env,
+        param_names,
+        ..
+    } = applied;
+    let mut is_local = param_names.contains(&field.value);
+    let mut expr = body.as_ref();
+
+    loop {
+        expr = match &expr.value {
+            Expr::Let(Let { patt, init, body }) => {
+                bind(patt, init, &mut applied_env)?;
+                is_local |= binds(&patt.value, field.value);
+                body
+            }
+            Expr::LetRec(LetRec { bindings, body }) => {
+                bind_rec_group(bindings, &mut applied_env)?;
+                is_local |= bindings
+                    .iter()
+                    .any(|member| member.binder.value.name == field.value);
+                body
+            }
+            _ => break,
+        };
+    }
+
+    applied_env
+        .get(field.value)
+        .filter(|_| is_local)
+        .map(|value| value.as_ref().clone())
+        .ok_or_else(|| Error::new(field.span, format!("Struct has no field `{}`", field.value)))
+}
+
 /// Evaluates the expression in the given environment and returns the resulting value.
 pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'src>, Error> {
     Ok(match &expr.value {
@@ -313,10 +363,11 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
                 ));
             }
         },
-        Expr::Eval(operand) => match eval(operand, env)? {
-            Value::Struct(Struct {
-                body, applied_env, ..
-            }) => eval(&body, applied_env)?,
+        Expr::Eval(Eval { operand, field }) => match eval(operand, env)? {
+            Value::Struct(applied) => match field {
+                Some(field) => eval_field(applied, *field)?,
+                None => eval(&applied.body, applied.applied_env)?,
+            },
             v => {
                 return Err(Error::new(
                     expr.span,
@@ -392,6 +443,7 @@ pub fn eval<'src>(expr: &Spanned<Expr<'src>>, env: Env<'src>) -> Result<Value<'s
             bind_rec_group(bindings, &mut new_env)?;
             eval(body, new_env)?
         }
+        Expr::Scope(body) => eval(body, env)?,
         Expr::Builtin(f) => f(expr, &env)?,
     })
 }
@@ -451,7 +503,7 @@ mod tests {
     }
 
     fn evaluate(operand: Spanned<Expr<'_>>) -> Spanned<Expr<'_>> {
-        spanned(Expr::Eval(Box::new(operand)))
+        spanned(Expr::Eval(Eval::new(operand, None)))
     }
 
     fn binding<'src>(
@@ -630,6 +682,7 @@ mod tests {
                     value: Rc::new(Value::Int(42))
                 }]),
                 applied_env: env_from([("id", id), ("y", Value::Int(42))]),
+                param_names: Rc::from(["y"]),
             }),
         );
         let Value::Struct(Struct {
@@ -663,6 +716,7 @@ mod tests {
                         value: x_arg,
                     }]),
                     applied_env,
+                    param_names: Rc::from(["x"]),
                 }),
             ),
         ]);

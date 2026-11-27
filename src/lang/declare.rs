@@ -62,9 +62,19 @@ impl<T: SpanlessPartialEq> SpanlessPartialEq for Vec<T> {
     }
 }
 
-impl SpanlessPartialEq for Vec<&str> {
+impl<T: SpanlessPartialEq> SpanlessPartialEq for Option<T> {
     fn spanless_eq(&self, other: &Self) -> bool {
-        self.len() == other.len() && self.iter().zip(other.iter()).all(|(l, r)| l.eq(r))
+        match (self, other) {
+            (Some(l), Some(r)) => l.spanless_eq(r),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl SpanlessPartialEq for &str {
+    fn spanless_eq(&self, other: &Self) -> bool {
+        self.eq(other)
     }
 }
 
@@ -271,7 +281,7 @@ mod parse {
         }
     }
 
-    /// [`SyntaxExpr::Call`], [`SyntaxExpr::Fn`]
+    /// [`SyntaxExpr::Call`], [`SyntaxExpr::Eval`], [`SyntaxExpr::Fn`]
     mod r#fn {
         use super::*;
 
@@ -286,6 +296,38 @@ mod parse {
         impl<E: SpanlessPartialEq> SpanlessPartialEq for Call<E> {
             fn spanless_eq(&self, other: &Self) -> bool {
                 self.callee.spanless_eq(&other.callee) && self.args.spanless_eq(&other.args)
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct Eval<'src, E> {
+            pub operand: Box<Spanned<E>>,
+            pub field: Option<Spanned<&'src str>>,
+        }
+
+        impl<'src, E> Eval<'src, E> {
+            pub fn new(operand: Spanned<E>, field: Option<Spanned<&'src str>>) -> Self {
+                Self {
+                    operand: Box::new(operand),
+                    field,
+                }
+            }
+        }
+
+        impl<E: fmt::Display> fmt::Display for Eval<'_, E> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(
+                    f,
+                    "{}.{}",
+                    self.operand.value,
+                    self.field.map_or("", |field| field.value)
+                )
+            }
+        }
+
+        impl<E: SpanlessPartialEq> SpanlessPartialEq for Eval<'_, E> {
+            fn spanless_eq(&self, other: &Self) -> bool {
+                self.operand.spanless_eq(&other.operand) && self.field.spanless_eq(&other.field)
             }
         }
 
@@ -499,9 +541,11 @@ mod parse {
         #[derive(Debug, Clone, PartialEq)]
         pub enum SyntaxExpr<'src> {
             Atom(Expr<'src>),
+            Block(Box<Spanned<Self>>),
+            Group(Box<Spanned<Self>>),
             Tuple(Vec<Spanned<Self>>),
             Call(Call<Self>),
-            Eval(Box<Spanned<Self>>),
+            Eval(Eval<'src, Self>),
             Fn(FnExpr<'src, Box<Spanned<Self>>>),
             Case(Case<'src, Self>),
             Ops(Ops<'src>),
@@ -514,6 +558,8 @@ mod parse {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 match self {
                     SyntaxExpr::Atom(expr) => write!(f, "{expr}"),
+                    SyntaxExpr::Block(expr) => write!(f, "{{ {} }}", expr.value),
+                    SyntaxExpr::Group(expr) => write!(f, "({})", expr.value),
                     SyntaxExpr::Tuple(elements) => fmt_tuple(f, elements.iter().map(|e| &e.value)),
                     SyntaxExpr::Call(Call { callee, args }) => write!(
                         f,
@@ -525,7 +571,7 @@ mod parse {
                             .collect::<Vec<_>>()
                             .join(", "),
                     ),
-                    SyntaxExpr::Eval(operand) => write!(f, "{}.", operand.value),
+                    SyntaxExpr::Eval(expr) => write!(f, "{expr}"),
                     SyntaxExpr::Fn(FnExpr { params, body }) => {
                         write!(
                             f,
@@ -581,6 +627,8 @@ mod parse {
             fn spanless_eq(&self, other: &Self) -> bool {
                 match (self, other) {
                     (SyntaxExpr::Atom(l), SyntaxExpr::Atom(r)) => l.spanless_eq(r),
+                    (SyntaxExpr::Block(l), SyntaxExpr::Block(r)) => l.spanless_eq(r),
+                    (SyntaxExpr::Group(l), SyntaxExpr::Group(r)) => l.spanless_eq(r),
                     (SyntaxExpr::Tuple(l), SyntaxExpr::Tuple(r)) => l.spanless_eq(r),
                     (SyntaxExpr::Call(l), SyntaxExpr::Call(r)) => l.spanless_eq(r),
                     (SyntaxExpr::Eval(l), SyntaxExpr::Eval(r)) => l.spanless_eq(r),
@@ -640,6 +688,8 @@ mod fixity {
         pub body: Rc<Spanned<Expr<'src>>>,
         pub args: StructArgs<'src>,
         pub applied_env: Env<'src>,
+        // Includes destructured names, but not captured or recursive names.
+        pub param_names: Rc<[&'src str]>,
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -735,12 +785,13 @@ mod fixity {
         Var(&'src str),
         Tuple(Vec<Spanned<Self>>),
         Call(Call<Self>),
-        Eval(Box<Spanned<Self>>),
+        Eval(Eval<'src, Self>),
         Fn(FnExpr<'src, Rc<Spanned<Self>>>),
         Case(Case<'src, Self>),
         Op(Op<'src>),
         Let(Let<'src, Self>),
         LetRec(LetRec<'src, Self, Rc<Spanned<Self>>>),
+        Scope(Box<Spanned<Self>>),
         Builtin(fn(&Spanned<Expr<'src>>, &Env<'src>) -> Result<Value<'src>, Error>),
     }
 
@@ -761,7 +812,7 @@ mod fixity {
                         .collect::<Vec<_>>()
                         .join(", "),
                 ),
-                Expr::Eval(operand) => write!(f, "{}.", operand.value),
+                Expr::Eval(expr) => write!(f, "{expr}"),
                 Expr::Fn(FnExpr { params, body }) => {
                     write!(
                         f,
@@ -815,6 +866,7 @@ mod fixity {
                     }
                     write!(f, " }} {}", body.value)
                 }
+                Expr::Scope(expr) => write!(f, "{{ {} }}", expr.value),
                 Expr::Builtin(_) => write!(f, "<builtin>"),
             }
         }
@@ -834,6 +886,7 @@ mod fixity {
                 (Expr::Op(l), Expr::Op(r)) => l.spanless_eq(r),
                 (Expr::Let(l), Expr::Let(r)) => l.spanless_eq(r),
                 (Expr::LetRec(l), Expr::LetRec(r)) => l.spanless_eq(r),
+                (Expr::Scope(l), Expr::Scope(r)) => l.spanless_eq(r),
                 _ => false,
             }
         }

@@ -84,7 +84,12 @@ pub fn with_span<'src>(mut body: Rc<Spanned<Expr<'src>>>, span: Span) -> Rc<Span
                     set_expr_span(arg, span);
                 }
             }
-            Expr::Eval(operand) => set_expr_span(operand, span),
+            Expr::Eval(Eval { operand, field }) => {
+                set_expr_span(operand, span);
+                if let Some(field) = field {
+                    field.span = span;
+                }
+            }
             Expr::Fn(FnExpr { params, body }) => {
                 set_param_spans(params, span);
                 set_expr_span(Rc::make_mut(body), span);
@@ -115,6 +120,7 @@ pub fn with_span<'src>(mut body: Rc<Spanned<Expr<'src>>>, span: Span) -> Rc<Span
                 }
                 set_expr_span(body, span);
             }
+            Expr::Scope(body) => set_expr_span(body, span),
             Expr::Err | Expr::Lit(_) | Expr::Var(_) | Expr::Builtin(_) => {}
         }
     }
@@ -159,6 +165,7 @@ pub fn env<'src>() -> Env<'src> {
         body_span: Span,
         fields: [Binding<'src>; N],
     ) -> Value<'src> {
+        let param_names = Rc::from(fields.each_ref().map(|field| field.name));
         let applied_env = fields
             .iter()
             .map(|arg| (arg.name, Rc::clone(&arg.value)))
@@ -177,6 +184,7 @@ pub fn env<'src>() -> Env<'src> {
             body: Rc::new(Spanned::new(Expr::Lit(Value::Unit), body_span)),
             args,
             applied_env,
+            param_names,
         })
     }
 
@@ -370,7 +378,7 @@ mod tests {
     }
 
     fn evaluate(operand: Spanned<Expr<'_>>) -> Spanned<Expr<'_>> {
-        spanned(Expr::Eval(Box::new(operand)))
+        spanned(Expr::Eval(Eval::new(operand, None)))
     }
 
     fn var(name: &str, span: std::ops::Range<usize>) -> Spanned<Expr<'_>> {
@@ -634,7 +642,7 @@ mod tests {
                 }),
                 span,
             );
-            let force = Spanned::new(Expr::Eval(Box::new(apply)), span);
+            let force = Spanned::new(Expr::Eval(Eval::new(apply, None)), span);
             let tuple = Spanned::new(Expr::Tuple(vec![force]), span);
             Spanned::new(binding("combine", function, tuple), span)
         }
@@ -1022,6 +1030,7 @@ mod tests {
             body: Rc::new(spanned(Expr::Lit(Value::Int(3)))),
             args,
             applied_env,
+            param_names: Rc::from(["a", "b"]),
         });
         for (a, b) in [
             (Value::Int(1), Value::Float(1.0)),

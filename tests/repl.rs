@@ -119,6 +119,16 @@ fn test_repl_recovers_from_errors_and_reports_the_original_definition() {
 }
 
 #[test]
+fn test_repl_reports_a_missing_field_at_its_name() {
+    let output = run_repl("let α = fn(x) { let y = x missing_result }\nα(42).y\nα(42).β\n");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(std::str::from_utf8(&output.stdout).unwrap(), "42\n");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(stderr.contains("<repl:3>:1:7"), "{stderr}");
+    assert!(stderr.contains("Struct has no field `β`"), "{stderr}");
+}
+
+#[test]
 fn test_repl_reports_the_failed_pattern_and_its_argument_across_submissions() {
     let output = run_repl("let α = 1\nlet f = fn(1, (x, y)) { x }\nf(α, 42)\n");
     assert_eq!(output.status.code(), Some(0), "{output:?}");
